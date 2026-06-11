@@ -67,8 +67,8 @@ void GeckoSpa::update_command_version(uint8_t *cmd) {
   // Version byte is at offset 12 for config/status messages, offset 13 for others
   uint8_t version_offset = 14;
 
-  cmd[version_offset] = config_version;
-  cmd[version_offset+1] = status_version;
+  cmd[version_offset] = config_version_;
+  cmd[version_offset+1] = status_version_;
 }
 
 void GeckoSpa::send_light_command(bool on) {
