@@ -45,13 +45,25 @@ void GeckoSpa::loop() {
     }
   }
 
-  // Check connection timeout (1 minute)
-  if (connected_ && (millis() - last_i2c_time_ > 60000)) {
-    connected_ = false;
-    if (connected_sensor_)
-      connected_sensor_->publish_state(false);
-    ESP_LOGW(TAG, "Spa connection lost (timeout)");
-    reset_arduino();  // Reset Arduino on disconnect
+  // Check connection timeout (1 minute without I2C traffic)
+  if (millis() - last_i2c_time_ > 60000) {
+    if (connected_) {
+      connected_ = false;
+      if (connected_sensor_)
+        connected_sensor_->publish_state(false);
+      ESP_LOGW(TAG, "Spa connection lost (timeout)");
+      reset_retry_count_ = 0;
+      reset_arduino();
+    } else if (!reset_in_progress_) {
+      // Not connected and not mid-reset: retry with backoff
+      // Retry intervals: 30s, 60s, 120s, then every 120s (max 5 retries before giving up)
+      uint32_t backoff = 30000UL * (1 << min(reset_retry_count_, (uint8_t)2));
+      if (reset_retry_count_ < 5 && (millis() - reset_start_time_ > backoff)) {
+        ESP_LOGW(TAG, "Arduino recovery retry %d/%d (backoff %ds)",
+                 reset_retry_count_ + 1, 5, backoff / 1000);
+        reset_arduino();
+      }
+    }
   }
 
   // Send GO keep-alive every 23 seconds (triggers handshake sequence)
@@ -177,10 +189,12 @@ void GeckoSpa::reset_arduino() {
     ESP_LOGD(TAG, "Reset already in progress");
     return;
   }
-  ESP_LOGI(TAG, "Resetting Arduino");
+  ESP_LOGI(TAG, "Resetting Arduino (attempt %d)", reset_retry_count_ + 1);
+  arduino_ready_ = false;
   reset_pin_->digital_write(false);  // Pull LOW to reset
   reset_start_time_ = millis();
   reset_in_progress_ = true;
+  reset_retry_count_++;
 }
 
 uint8_t GeckoSpa::calc_checksum(const uint8_t *data, uint8_t len) {
@@ -237,6 +251,7 @@ void GeckoSpa::process_proxy_message(const char *msg) {
     process_i2c_message(data, len);
   } else if (strcmp(msg, "READY") == 0) {
     ESP_LOGI(TAG, "Arduino proxy ready");
+    arduino_ready_ = true;
   } else if (strcmp(msg, "I2C_PROXY:V1") == 0) {
     ESP_LOGI(TAG, "Arduino proxy version 1");
   } else if (strcmp(msg, "TX:OK") == 0) {
@@ -251,6 +266,7 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
   last_i2c_time_ = millis();
   if (!connected_) {
     connected_ = true;
+    reset_retry_count_ = 0;
     if (connected_sensor_)
       connected_sensor_->publish_state(true);
     ESP_LOGI(TAG, "Spa connected (I2C traffic detected)");

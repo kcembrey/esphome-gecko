@@ -1,0 +1,289 @@
+substitutions:
+  device_name: spa-controller
+
+esphome:
+  name: ${device_name}
+  friendly_name: Spa Controller
+
+esp32:
+  board: esp32-poe-iso
+  framework:
+    type: arduino
+
+# Import Gecko Spa component
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+logger:
+  level: DEBUG
+  baud_rate: 0
+
+# Ethernet (PoE) - replaces WiFi
+ethernet:
+  type: LAN8720
+  mdc_pin: GPIO23
+  mdio_pin: GPIO18
+  clk_mode: GPIO17_OUT
+  phy_addr: 0
+  power_pin: GPIO12
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+# Time synced from Home Assistant for accurate date calculations
+time:
+  - platform: homeassistant
+    id: ha_time
+    timezone: Europe/Stockholm
+
+# UART connection to Arduino I2C Proxy
+# NOTE: GPIO17 is used by Ethernet, GPIO5 by PHY reset, GPIO16 by PSRAM (WROVER)
+# Using GPIO4 (TX) and GPIO36 (RX, input-only - fine for UART RX)
+uart:
+  id: arduino_uart
+  tx_pin: GPIO4
+  rx_pin: GPIO36
+  baud_rate: 115200
+  rx_buffer_size: 512
+
+# Gecko Spa component
+# NOTE: GPIO14 used for Arduino reset (GPIO17 is taken by Ethernet PHY)
+gecko_spa:
+  id: spa
+  uart_id: arduino_uart
+  reset_pin: GPIO14
+  notif_date_format: D-M-Y  # Change to Y-M-D if dates for reminders don't look right
+
+# Climate control
+climate:
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    name: "Spa"
+
+# Switches
+switch:
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: light
+    name: "Spa Light"
+    icon: "mdi:lightbulb"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: circulation
+    name: "Spa Circulation"
+    icon: "mdi:rotate-3d-variant"
+
+  # Pumps 1-4 (controllable - P2-P4 use experimental function IDs)
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: pump1
+    name: "Spa Pump 1"
+    icon: "mdi:pump"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: pump2
+    name: "Spa Pump 2"
+    icon: "mdi:pump"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: pump3
+    name: "Spa Pump 3"
+    icon: "mdi:pump"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: pump4
+    name: "Spa Pump 4"
+    icon: "mdi:pump"
+
+# Program selector
+select:
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    name: "Spa Program"
+    icon: "mdi:format-list-bulleted"
+
+# Status sensors
+binary_sensor:
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: standby
+    name: "Spa Standby"
+    icon: "mdi:power-standby"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: connected
+    name: "Spa Connected"
+    icon: "mdi:connection"
+    device_class: connectivity
+
+  # Read-only status sensors (no control commands available)
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: waterfall
+    name: "Spa Waterfall"
+    icon: "mdi:waterfall"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: blower
+    name: "Spa Blower"
+    icon: "mdi:fan"
+
+# Spa internal clock and notification due dates
+text_sensor:
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: spa_time
+    name: "Spa Time"
+    icon: "mdi:clock-outline"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: rinse_filter
+    id: spa_rinse_filter
+    name: "Spa Rinse Filter Due"
+    icon: "mdi:air-filter"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: clean_filter
+    id: spa_clean_filter
+    name: "Spa Clean Filter Due"
+    icon: "mdi:vacuum"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: change_water
+    id: spa_change_water
+    name: "Spa Change Water Due"
+    icon: "mdi:water-sync"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: spa_checkup
+    id: spa_checkup
+    name: "Spa Checkup Due"
+    icon: "mdi:wrench-clock"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: config_version
+    name: "Spa Config Version"
+    icon: "mdi:file-cog"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: status_version
+    name: "Spa Status Version"
+    icon: "mdi:file-document"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: lock_mode
+    name: "Spa Lock Mode"
+    icon: "mdi:lock"
+
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: pack_type
+    name: "Spa Pack Type"
+    icon: "mdi:package-variant"
+
+# Days remaining sensors (calculated from due dates using HA time)
+sensor:
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: pump_timer
+    name: "Spa Pump Timer"
+
+  - platform: template
+    name: "Spa Rinse Filter Days"
+    id: rinse_filter_days
+    unit_of_measurement: "days"
+    icon: "mdi:air-filter"
+    lambda: |-
+      auto due = id(spa_rinse_filter).state;
+      if (due.empty()) return NAN;
+      int y, m, d;
+      if (sscanf(due.c_str(), "%d-%d-%d", &y, &m, &d) != 3) return NAN;
+      auto now = id(ha_time).now();
+      if (!now.is_valid()) return NAN;
+      int due_days = y*365 + m*30 + d;
+      int now_days = now.year*365 + now.month*30 + now.day_of_month;
+      return (float)(due_days - now_days);
+
+  - platform: template
+    name: "Spa Clean Filter Days"
+    id: clean_filter_days
+    unit_of_measurement: "days"
+    icon: "mdi:vacuum"
+    lambda: |-
+      auto due = id(spa_clean_filter).state;
+      if (due.empty()) return NAN;
+      int y, m, d;
+      if (sscanf(due.c_str(), "%d-%d-%d", &y, &m, &d) != 3) return NAN;
+      auto now = id(ha_time).now();
+      if (!now.is_valid()) return NAN;
+      int due_days = y*365 + m*30 + d;
+      int now_days = now.year*365 + now.month*30 + now.day_of_month;
+      return (float)(due_days - now_days);
+
+  - platform: template
+    name: "Spa Change Water Days"
+    id: change_water_days
+    unit_of_measurement: "days"
+    icon: "mdi:water-sync"
+    lambda: |-
+      auto due = id(spa_change_water).state;
+      if (due.empty()) return NAN;
+      int y, m, d;
+      if (sscanf(due.c_str(), "%d-%d-%d", &y, &m, &d) != 3) return NAN;
+      auto now = id(ha_time).now();
+      if (!now.is_valid()) return NAN;
+      int due_days = y*365 + m*30 + d;
+      int now_days = now.year*365 + now.month*30 + now.day_of_month;
+      return (float)(due_days - now_days);
+
+  - platform: template
+    name: "Spa Checkup Days"
+    id: spa_checkup_days
+    unit_of_measurement: "days"
+    icon: "mdi:wrench-clock"
+    lambda: |-
+      auto due = id(spa_checkup).state;
+      if (due.empty()) return NAN;
+      int y, m, d;
+      if (sscanf(due.c_str(), "%d-%d-%d", &y, &m, &d) != 3) return NAN;
+      auto now = id(ha_time).now();
+      if (!now.is_valid()) return NAN;
+      int due_days = y*365 + m*30 + d;
+      int now_days = now.year*365 + now.month*30 + now.day_of_month;
+      return (float)(due_days - now_days);
+
+# Buttons
+button:
+  - platform: template
+    name: "Refresh Spa Status"
+    icon: "mdi:refresh"
+    on_press:
+      - lambda: |-
+          id(spa).request_status();
+
+  - platform: template
+    name: "Reset Arduino"
+    icon: "mdi:restart"
+    on_press:
+      - lambda: |-
+          id(spa).reset_arduino();

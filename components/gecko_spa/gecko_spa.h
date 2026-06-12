@@ -184,6 +184,8 @@ class GeckoSpa : public Component, public uart::UARTDevice {
   uint32_t last_go_send_time_{0};
   uint32_t reset_start_time_{0};
   bool reset_in_progress_{false};
+  uint8_t reset_retry_count_{0};        // Number of consecutive resets without recovery
+  bool arduino_ready_{false};           // True after Arduino sends READY
   char notification_date_[4][12]{ "", "", "", ""};
 
   // Version tracking (parsed from handshake XML filenames)
