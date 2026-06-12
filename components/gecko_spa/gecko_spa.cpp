@@ -57,7 +57,7 @@ void GeckoSpa::loop() {
     } else if (!reset_in_progress_) {
       // Not connected and not mid-reset: retry with backoff
       // Retry intervals: 30s, 60s, 120s, then every 120s (max 5 retries before giving up)
-      uint32_t backoff = 30000UL * (1 << min(reset_retry_count_, (uint8_t)2));
+      uint32_t backoff = 30000UL * (1 << std::min(reset_retry_count_, (uint8_t)2));
       if (reset_retry_count_ < 5 && (millis() - reset_start_time_ > backoff)) {
         ESP_LOGW(TAG, "Arduino recovery retry %d/%d (backoff %ds)",
                  reset_retry_count_ + 1, 5, backoff / 1000);
@@ -870,9 +870,7 @@ void GeckoSpaClimate::setup() {
 
 climate::ClimateTraits GeckoSpaClimate::traits() {
   auto traits = climate::ClimateTraits();
-  traits.set_supports_current_temperature(true);
   traits.set_supported_modes({climate::CLIMATE_MODE_HEAT, climate::CLIMATE_MODE_COOL});
-  traits.set_supports_action(true);
   traits.set_visual_min_temperature(26.0);
   traits.set_visual_max_temperature(40.0);
   traits.set_visual_temperature_step(0.5);
