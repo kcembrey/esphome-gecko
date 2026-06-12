@@ -77,7 +77,7 @@ void GeckoSpa::loop() {
 void GeckoSpa::send_light_command(bool on) {
   uint8_t cmd[20] = {
       0x17, 0x0A, 0x00, 0x00, 0x00, 0x17, 0x09, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, 0x52, 0x51,
+      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, config_version_, status_version_,
       0x01, 0x33, (uint8_t)(on ? 0x01 : 0x00), 0x00};
   cmd[19] = calc_checksum(cmd, 20);
   send_i2c_message(cmd, 20);
@@ -87,7 +87,7 @@ void GeckoSpa::send_light_command(bool on) {
 void GeckoSpa::send_circ_command(bool on) {
   uint8_t cmd[20] = {
       0x17, 0x0A, 0x00, 0x00, 0x00, 0x17, 0x09, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, 0x52, 0x51,
+      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, config_version_, status_version_,
       0x01, 0x6B, (uint8_t)(on ? 0x01 : 0x00), 0x00};
   cmd[19] = calc_checksum(cmd, 20);
   send_i2c_message(cmd, 20);
@@ -97,11 +97,11 @@ void GeckoSpa::send_circ_command(bool on) {
 void GeckoSpa::send_pump1_command(uint8_t state) {
   // P1 function ID: 0x03
   // State: 0=OFF, 2=ON/HIGH (P1 uses 0x02 for ON, not 0x01)
-  uint8_t state_val = (state == 0) ? 0x00 : 0x02;
+  uint8_t state_val = (user_demand_state_ & 0xFC) | ((state == 0) ? 0x00 : 0x02);
 
   uint8_t cmd[20] = {
       0x17, 0x0A, 0x00, 0x00, 0x00, 0x17, 0x09, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, 0x52, 0x51,
+      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, config_version_, status_version_,
       0x01, 0x03, state_val, 0x00};
   cmd[19] = calc_checksum(cmd, 20);
   send_i2c_message(cmd, 20);
@@ -109,39 +109,42 @@ void GeckoSpa::send_pump1_command(uint8_t state) {
 }
 
 void GeckoSpa::send_pump2_command(uint8_t state) {
-  // P2 function ID: 0x04 (EXPERIMENTAL - sequential from P1)
-  uint8_t state_val = (state == 0) ? 0x00 : 0x02;
+  // P2 function ID: 0x03
+  // State: 0=OFF, 8=ON/HIGH (P2 uses 0x08 for ON, not 0x01)
+  uint8_t state_val = (user_demand_state_ & 0xF3) | ((state == 0) ? 0x00 : 0x08);
 
   uint8_t cmd[20] = {
       0x17, 0x0A, 0x00, 0x00, 0x00, 0x17, 0x09, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, 0x52, 0x51,
-      0x01, 0x04, state_val, 0x00};
+      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, config_version_, status_version_,
+      0x01, 0x03, state_val, 0x00};
   cmd[19] = calc_checksum(cmd, 20);
   send_i2c_message(cmd, 20);
-  ESP_LOGI(TAG, "Sent P2 state=%d command (val=0x%02X) [EXPERIMENTAL]", state, state_val);
+  ESP_LOGI(TAG, "Sent P2 state=%d command (val=0x%02X)", state, state_val);
 }
 
 void GeckoSpa::send_pump3_command(uint8_t state) {
-  // P3 function ID: 0x05 (EXPERIMENTAL - sequential from P1)
-  uint8_t state_val = (state == 0) ? 0x00 : 0x02;
+  // P3 function ID: 0x03
+  // State: 0=OFF, 32=ON/HIGH (P3 uses 0x20 for ON, not 0x01)
+  uint8_t state_val = (user_demand_state_ & 0xCF) | ((state == 0) ? 0x00 : 0x20);
 
   uint8_t cmd[20] = {
       0x17, 0x0A, 0x00, 0x00, 0x00, 0x17, 0x09, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, 0x52, 0x51,
-      0x01, 0x05, state_val, 0x00};
+      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, config_version_, status_version_,
+      0x01, 0x03, state_val, 0x00};
   cmd[19] = calc_checksum(cmd, 20);
   send_i2c_message(cmd, 20);
   ESP_LOGI(TAG, "Sent P3 state=%d command (val=0x%02X) [EXPERIMENTAL]", state, state_val);
 }
 
 void GeckoSpa::send_pump4_command(uint8_t state) {
-  // P4 function ID: 0x06 (EXPERIMENTAL - sequential from P1)
-  uint8_t state_val = (state == 0) ? 0x00 : 0x02;
+  // P4 function ID: 0x03
+  // State: 0=OFF, 128=ON/HIGH (P4 uses 0x80 for ON, not 0x01)
+  uint8_t state_val = (user_demand_state_ & 0x3F) | ((state == 0) ? 0x00 : 0x80);
 
   uint8_t cmd[20] = {
       0x17, 0x0A, 0x00, 0x00, 0x00, 0x17, 0x09, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, 0x52, 0x51,
-      0x01, 0x06, state_val, 0x00};
+      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, config_version_, status_version_,
+      0x01, 0x03, state_val, 0x00};
   cmd[19] = calc_checksum(cmd, 20);
   send_i2c_message(cmd, 20);
   ESP_LOGI(TAG, "Sent P4 state=%d command (val=0x%02X) [EXPERIMENTAL]", state, state_val);
@@ -166,7 +169,7 @@ void GeckoSpa::send_temperature_command(float temp_c) {
   uint8_t temp_raw = (uint8_t)((temp_c * 18.0) - 512.0);
   uint8_t cmd[21] = {
       0x17, 0x0A, 0x00, 0x00, 0x00, 0x17, 0x09, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x07, 0x46, 0x52, 0x51,
+      0x00, 0x00, 0x00, 0x00, 0x07, 0x46, config_version_, status_version_,
       0x00, 0x01, 0x02, temp_raw, 0x00};
   cmd[20] = calc_checksum(cmd, 21);
   send_i2c_message(cmd, 21);
@@ -556,11 +559,11 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
   static const char* quiet_str[] = {"NOT_SET", "DRAIN", "SOAK", "OFF"};
 
   // User demand P1-P4 (2-bit fields in UdP1 byte)
-  uint8_t udP1_raw = data[b_udP1];
-  uint8_t udP1 = (udP1_raw >> 0) & 0x03;  // bits 0-1
-  uint8_t udP2 = (udP1_raw >> 2) & 0x03;  // bits 2-3
-  uint8_t udP3 = (udP1_raw >> 4) & 0x03;  // bits 4-5
-  uint8_t udP4 = (udP1_raw >> 6) & 0x03;  // bits 6-7
+  user_demand_state_ = data[b_udP1];
+  uint8_t udP1 = (user_demand_state_ >> 0) & 0x03;  // bits 0-1
+  uint8_t udP2 = (user_demand_state_ >> 2) & 0x03;  // bits 2-3
+  uint8_t udP3 = (user_demand_state_ >> 4) & 0x03;  // bits 4-5
+  uint8_t udP4 = (user_demand_state_ >> 6) & 0x03;  // bits 6-7
   static const char* pump_ud_str[] = {"OFF", "LO", "HI", "?"};
 
   // Device status byte (CP, BL, Heater, Waterfall)

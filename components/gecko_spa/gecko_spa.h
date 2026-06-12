@@ -169,6 +169,7 @@ class GeckoSpa : public Component, public uart::UARTDevice {
   bool standby_state_{false};
   bool connected_{false};
   bool first_status_received_{false};
+  uint8_t user_demand_state_{0};  // Bitfield from udP1-udP4 (P1-P4 user demand)
   uint8_t pump1_state_{0};   // 0=OFF, 1=HIGH, 2=LOW
   uint8_t pump2_state_{0};   // Read-only
   uint8_t pump3_state_{0};   // Read-only
