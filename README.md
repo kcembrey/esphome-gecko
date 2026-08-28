@@ -1,35 +1,41 @@
 <p align="center"><img src="https://github.com/zteifel/esphome-gecko/blob/master/logo_small.png" alt="Smart Spa Heating" width="400"><img src="https://github.com/zteifel/smart-spa-heating/blob/main/logo_small.png" alt="Smart Spa Heating" width="400"></p>
 
 
-Home Assistant integration for Gecko spa systems using ESP32-S2 and Arduino Nano Clone as an I2C proxy. Tested together with a Gecko IN.YE-3-H3.0 (YE-3-CE) spa controller. Feel free to combine with my home assistant integration for smart heating based on electricty price [Smart Spa Heating Integration](https://github.com/zteifel/smart-spa-heating).
+Home Assistant integration for Gecko spa systems. The ESP32 drives the spa's 5V I2C bus directly through a bidirectional logic level converter - no Arduino in the middle. Tested together with a Gecko IN.YE-3-H3.0 (YE-3-CE) spa controller. Feel free to combine with my home assistant integration for smart heating based on electricty price [Smart Spa Heating Integration](https://github.com/zteifel/smart-spa-heating).
 
 ## Architecture
 
 ```
-┌─────────────────┐     UART      ┌──────────────────┐     I2C     ┌─────────────┐
-│   ESP32-S2      │◄─────────────►│  Arduino Nano    │◄───────────►│  Gecko Spa  │
-│                 │   (115200)    │   (I2C Proxy)    │   (0x17)    │             │
-│ - All protocol  │               │                  │             │             │
-│   logic         │  TX:hex\n     │ - Hex decode     │             │             │
-│ - Home Assistant│  ─────────►   │ - Forward to I2C │             │             │
-│ - OTA updates   │               │                  │             │             │
-│                 │  RX:len:hex\n │ - Forward I2C RX │             │             │
-│                 │  ◄────────    │   as hex         │             │             │
-└─────────────────┘               └──────────────────┘             └─────────────┘
+┌──────────────────┐              ┌──────────────────┐             ┌─────────────┐
+│      ESP32       │   3.3V I2C   │  Level Converter │   5V I2C    │  Gecko Spa  │
+│                  │◄────────────►│    (BSS138 x2)   │◄───────────►│             │
+│ - I2C slave      │  SDA / SCL   │                  │   (0x17)    │             │
+│   (listening)    │              │  Bidirectional,  │             │             │
+│ - I2C master     │              │  open-drain safe │             │             │
+│   (short bursts) │              │                  │             │             │
+│ - Protocol logic │              │                  │             │             │
+│ - Home Assistant │              │                  │             │             │
+│ - OTA updates    │              │                  │             │             │
+└──────────────────┘              └──────────────────┘             └─────────────┘
 ```
 
-**Key Design Decision:** The Arduino acts as a "dumb" I2C proxy. All protocol encoding/decoding happens on the ESP32, which can be updated over WiFi (OTA). This eliminates the need to physically access the spa for firmware updates and make uses of the arduino i2c capability how handlings the multi-master and large i2c messages.
+**Key Design Decision:** The Gecko bus is multi-master and both ends answer to address `0x17`, so the ESP32 cannot stay in one role. It sits in I2C **slave** mode listening to the spa, and flips to **master** mode for the few milliseconds it takes to push a command or a handshake ACK out, then goes straight back to listening. That is exactly what the Arduino proxy used to do internally - it now happens on the ESP32 itself, and all protocol encoding/decoding stays where it always was, on a chip you can update over WiFi (OTA).
+
+Dropping the Arduino also removes the failure mode where the spa restarts but the Arduino does not (or the other way round) and the link stays dead until something power-cycles the proxy. There is no second processor to fall out of sync: when the bus goes quiet the ESP32 reinitialises its own I2C peripheral, which includes the standard nine-clock bus recovery.
+
+> **Still running the Arduino proxy?** It is still supported - see [Legacy: Arduino I2C Proxy](#legacy-arduino-i2c-proxy).
 
 ## Table of Contents
 
 1. [Installation](#installation)
 2. [Hardware Build](#hardware-build)
-3. [UART Proxy Protocol](#uart-proxy-protocol)
+3. [Configuration Reference](#configuration-reference)
 4. [I2C Protocol](#i2c-protocol)
-5. [Buy me a coffee](#buy-me-a-coffee)
-6. [TODO](#todo)
-7. [Troubleshooting](#troubleshoot)
-8. [Credits](#credits)
+5. [Legacy: Arduino I2C Proxy](#legacy-arduino-i2c-proxy)
+6. [Buy me a coffee](#buy-me-a-coffee)
+7. [TODO](#todo)
+8. [Troubleshooting](#troubleshooting)
+9. [Credits](#credits)
 
 ---
 
@@ -39,66 +45,7 @@ Home Assistant integration for Gecko spa systems using ESP32-S2 and Arduino Nano
 
 1. **Set up hardware** - See [Hardware Build](#hardware-build) section below
 
-2. **Flash the Arduino Nano** - Choose one of the following options:
-
-   **Option A: Use Precompiled Binary (Recommended)**
-
-   Download `arduino-i2c-proxy-atmega328p.hex` from the [GitHub Releases](https://github.com/zteifel/esphome-gecko/releases) page (or from `arduino/` folder).
-
-   Flash using avrdude:
-   ```bash
-   # Install avrdude (Ubuntu/Debian)
-   sudo apt install avrdude
-
-   # For Nano Clone (new bootloader) - 115200 baud
-   avrdude -v -patmega328p -carduino -P/dev/ttyUSB0 -b115200 -D -Uflash:w:arduino-i2c-proxy-atmega328p.hex:i
-
-   # For Original Arduino Nano (old bootloader) - 57600 baud
-   avrdude -v -patmega328p -carduino -P/dev/ttyUSB0 -b57600 -D -Uflash:w:arduino-i2c-proxy-atmega328p.hex:i
-   ```
-
-   > **Tip:** Most cheap Nano clones from AliExpress/Amazon use the new bootloader (115200 baud). If upload fails, try 57600 baud for original Nanos with old bootloader.
-
-   **Option B: Build from Source with PlatformIO**
-
-   The Arduino Wire library has a default 32-byte I2C buffer, but the spa sends messages up to 78 bytes. You **must** patch the Wire library to increase this buffer.
-
-   1. Install PlatformIO:
-      ```bash
-      pip install platformio
-      ```
-
-   2. Initialize the project to download dependencies:
-      ```bash
-      cd arduino
-      pio run
-      ```
-
-   3. **Patch the Wire library** - Edit the twi.h file to increase the buffer size:
-      ```bash
-      # Find your PlatformIO packages directory (usually ~/.platformio/packages/)
-      # Edit the twi.h file:
-      nano ~/.platformio/packages/framework-arduino-avr/libraries/Wire/src/utility/twi.h
-      ```
-
-      Find the line:
-      ```c
-      #ifndef TWI_BUFFER_LENGTH
-      #define TWI_BUFFER_LENGTH 32
-      ```
-
-      Change `32` to `128`:
-      ```c
-      #ifndef TWI_BUFFER_LENGTH
-      #define TWI_BUFFER_LENGTH 128
-      ```
-
-   4. Build and upload:
-      ```bash
-      pio run -t upload
-      ```
-
-   > **Why is patching needed?** The `-DTWI_BUFFER_LENGTH=128` build flag in `platformio.ini` should override this value, but some PlatformIO versions don't apply it correctly. Patching the source file directly ensures the buffer is always 128 bytes.
+2. **Nothing to flash but the ESP32** - the level converter is passive. If you are migrating from the Arduino proxy, unplug the Arduino and wire the converter in its place; see [Hardware Build](#hardware-build).
 
 3. **Create a secrets.yaml file** with your credentials:
    ```yaml
@@ -145,18 +92,12 @@ ota:
   platform: esphome
   password: !secret ota_password
 
-# UART connection to Arduino I2C Proxy
-uart:
-  id: arduino_uart
-  tx_pin: GPIO5
-  rx_pin: GPIO16
-  baud_rate: 115200
-  rx_buffer_size: 512
-
-# Gecko Spa component
+# Gecko Spa component - direct connection to the spa I2C bus.
+# GPIO3/GPIO4 are the pins labelled SDA/SCL on the Feather ESP32-S2.
 gecko_spa:
   id: spa
-  uart_id: arduino_uart
+  sda: GPIO3
+  scl: GPIO4
 
 # Climate control
 climate:
@@ -174,7 +115,7 @@ switch:
 
   - platform: gecko_spa
     gecko_spa_id: spa
-    type: pump
+    type: pump1
     name: "Spa Pump"
     icon: "mdi:pump"
 
@@ -253,7 +194,7 @@ After installation, you'll have these entities:
 |--------|------|-------------|
 | Spa | Climate | Temperature control with current/target display |
 | Spa Light | Switch | Control spa light |
-| Spa Pump | Switch | Control main pump |
+| Spa Pump 1 | Switch | Control main pump |
 | Spa Circulation | Switch | Control circulation pump |
 | Spa Program | Select | Choose program (Away, Standard, Energy, Super Energy, Weekend) |
 | Spa Standby | Binary Sensor | Standby mode status |
@@ -264,7 +205,7 @@ After installation, you'll have these entities:
 | Spa Change Water Due | Text Sensor | Due date for water change (YYYY-MM-DD) |
 | Spa Checkup Due | Text Sensor | Due date for spa checkup (YYYY-MM-DD) |
 | Refresh Spa Status | Button | Manually request status update |
-| Reset Arduino | Button | Reset the Arduino I2C proxy remotely |
+| Reconnect Spa Bus | Button | Reinitialise the I2C peripheral and recover the bus |
 
 ---
 
@@ -274,131 +215,96 @@ After installation, you'll have these entities:
 
 | Component | Description | Notes |
 |-----------|-------------|-------|
-| Adafruit Feather ESP32-S2 | WiFi microcontroller | Handles Home Assistant communication |
-| Arduino Nano Clone | I2C bridge | 5V logic for spa I2C bus |
-| Voltage Divider Resistors | 2.7kΩ + 5.6kΩ | Level shifting Arduino TX → ESP32 RX |
-| Dupont Wires | Various | Connections between components |
+| ESP32 board | WiFi/Ethernet microcontroller | Tested with Adafruit Feather ESP32-S2 and Olimex ESP32-POE-ISO |
+| Bidirectional logic level converter | 3.3V <-> 5V, 2 channels minimum | **Must be the MOSFET (BSS138) type.** See the warning below |
+| Dupont wires | Various | Connections between board, converter and spa |
+
+> **The converter type matters.** I2C is an open-drain bus: both ends pull the line low and pull-up resistors bring it back high. Only the passive MOSFET converters (BSS138, or a TXS010x) can pass that. A push-pull converter such as the **TXB0104 will not work** on I2C, and neither will a resistor voltage divider - that is fine for one-way UART, but it cannot pass a line the far end is holding down.
 
 ### Pin Connections
-#### ESP32-S2 to Arduino Nano Clone (UART + Reset)
 
-| ESP32-S2 Pin | Arduino Nano Clone Pin | Notes |
-|--------------|------------------|-------|
-| GPIO5 (TX) | RX (D0) | Direct connection (3.3V → 5V tolerant) |
-| GPIO16 (RX) | TX (D1) | Via voltage divider (5V → 3.3V) |
-| GPIO17 | RST | Arduino reset (directly, no resistor needed) |
-| GND | GND | Common ground required |
+#### ESP32 to Level Converter (low-voltage side)
 
-> **Arduino Reset:** GPIO17 directly connects to the Arduino RST pin. This allows resetting the Arduino from Home Assistant without physical access. The RST pin is active-LOW and has an internal pull-up resistor.
-
-#### Voltage Divider Circuit (Arduino TX → ESP32 RX)
-
-```
-Arduino TX (D1) ----[2.7kΩ]----+---- ESP32 GPIO16 (RX)
-                               |
-                            [5.6kΩ]
-                               |
-                              GND
-```
-
-Output voltage: ~2.7V (within ESP32 3.3V logic threshold)
-
-#### Arduino Nano Clone to Spa I2C Bus
-
-| Arduino Nano Clone Pin | Spa Connector | Notes |
-|------------------|---------------|-------|
-| A4 (SDA) | SDA | I2C Data |
-| A5 (SCL) | SCL | I2C Clock |
+| ESP32 Pin | Converter Pin | Notes |
+|-----------|---------------|-------|
+| SDA GPIO (GPIO3 on the Feather S2) | LV1 | I2C data, 3.3V side |
+| SCL GPIO (GPIO4 on the Feather S2) | LV2 | I2C clock, 3.3V side |
+| 3V3 | LV | Reference voltage for the low side |
 | GND | GND | Common ground |
 
-**Important:** Do NOT connect Arduino VCC to spa - power Arduino separately via USB or external supply.
+#### Level Converter to Spa (high-voltage side)
+
+| Converter Pin | Spa Connector | Notes |
+|---------------|---------------|-------|
+| HV1 | SDA | I2C data, 5V side |
+| HV2 | SCL | I2C clock, 5V side |
+| HV | 5V | Reference voltage for the high side |
+| GND | GND | Common ground required |
+
+**Pull-ups:** the spa bus already carries roughly 4.7k pull-ups to 5V, and BSS138 breakout boards carry 10k pull-ups on both sides. Do not add more.
+
+**Power:** the spa's 5V rail can supply the converter's HV reference, but do not run the whole ESP32 off it - use USB, an external supply, or PoE.
+
+> **Adafruit Feather ESP32-S2 only:** the board gates power to its on-board I2C pull-ups behind GPIO7. The example config drives that high on boot with an internal `gpio` switch. It is harmless when the converter supplies its own pull-ups, and required if it does not.
 
 ### Wiring Diagram
 Credits to agittins for the pictures
 
 <img src="./pictures/spa_pinouts.png" width="500"><img src="./pictures/spa_power.png" width="400">
-<img src="./pictures/arduino_nano_pinout.webp" width="350"><img src="./pictures/adafruit_esp32s2.png" width="550">
+<img src="./pictures/adafruit_esp32s2.png" width="550">
 
 ```
                     ┌─────────────────┐
                     │   Gecko Spa     │
                     │   Motherboard   │
                     │                 │
-                    │  SDA  SCL  GND  │
-                    └───┬────┬────┬───┘
-                        │    │    │
-    ┌───────────────────┼────┼────┼───────────────────────┐
-    │                   │    │    │                       │
-    │  ┌────────────────┴────┴────┴────────────────────┐  │
-    │  │             Arduino Nano Clone                │  │
-    │  │                                               │  │
-    │  │  A4(SDA)  A5(SCL)  GND   TX(D1)  RX(D0)  RST  │  │
-    │  └──────────────────────────────┬───────┬────┬───┘  │
-    │                        |        │       │    │      │
-    │                        |     [2.7kΩ]    │    │      │
-    │                        |        │       │    │      │
-    │                        |─[5.6kΩ]┼       |    |      │ 
-    │                        |        │       │    |      │
-    │                        |        │       │    │      │
-    │                        |        |       │    │      │
-    │                        |        |       │    │      │
-    │  ┌─────────────────────┴────────┴───────┴────┴───┐  │
-    │  │                    GND     GPIO16 GPIO5 GPIO17│  │
-    │  │                                               │  │
-    │  │               Adafruit ESP32-S2               │  │
-    │  └───────────────────────────────────────────────┘  │
-    │                                                     │
-    └─────────────────────────────────────────────────────┘
+                    │ SDA  SCL  5V GND│
+                    └──┬────┬────┬──┬─┘
+                       │    │    │  │
+    ┌──────────────────┼────┼────┼──┼───────────────────────┐
+    │                  │    │    │  │                       │
+    │  ┌───────────────┴────┴────┴──┴────────────────────┐  │
+    │  │  HV1  HV2   HV  GND                             │  │
+    │  │              Logic Level Converter              │  │
+    │  │                (BSS138, bidirectional)          │  │
+    │  │  LV1  LV2   LV  GND                             │  │
+    │  └───┬────┬─────┬───┬────────────────────────────-─┘  │
+    │      │    │     │   │                                 │
+    │  ┌───┴────┴─────┴───┴─────────────────────────────┐   │
+    │  │ GPIO3 GPIO4  3V3 GND                           │   │
+    │  │ (SDA) (SCL)                                    │   │
+    │  │               Adafruit ESP32-S2                │   │
+    │  └────────────────────────────────────────────────┘   │
+    │                                                       │
+    └───────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## UART Proxy Protocol
+## Configuration Reference
 
-### Overview
+### `gecko_spa` options
 
-The Arduino acts as a transparent I2C proxy. The ESP32 sends raw I2C bytes as hex strings, and the Arduino forwards them to the I2C bus. Similarly, I2C messages received by the Arduino are sent to the ESP32 as hex strings.
+| Option | Default | Description |
+|--------|---------|-------------|
+| `sda` | *(required for direct I2C)* | GPIO carrying I2C data to the level converter |
+| `scl` | *(required for direct I2C)* | GPIO carrying I2C clock to the level converter |
+| `i2c_bus` | `0` | Which of the ESP32's two I2C peripherals to use. Change it only if something else in your config already claims bus 0 |
+| `address` | `0x17` | Bus address. Both the spa and the controller answer to this |
+| `frequency` | `100kHz` | Bus speed. The spa runs standard mode; leave it alone unless you know otherwise |
+| `notif_date_format` | `D-M-Y` | Swap to `Y-M-D` if the maintenance reminder dates look wrong |
+| `uart_id` | - | Legacy Arduino proxy mode. Mutually exclusive with `sda`/`scl` |
+| `reset_pin` | - | Legacy Arduino proxy mode only - the GPIO wired to the Arduino's RST pin |
 
-### Message Format
+Direct I2C mode needs an ESP32 with `framework: type: arduino`, because I2C slave mode is only reachable through the Arduino core's HAL. Config validation will tell you if that is not the case.
 
-- **Baud Rate:** 115200
-- **Data Bits:** 8
-- **Parity:** None
-- **Stop Bits:** 1
-- **Line Ending:** `\n` (LF)
+### Lambdas
 
-### Commands (ESP32 → Arduino)
-
-| Command | Description |
-|---------|-------------|
-| `TX:<hex>\n` | Send hex bytes to I2C bus at address 0x17 |
-| `PING\n` | Health check |
-
-**Example - Send light ON command:**
-```
-TX:170A0000001709000000000646525101330163\n
-```
-
-### Responses (Arduino → ESP32)
-
-| Message | Description |
-|---------|-------------|
-| `I2C_PROXY:V1\n` | Firmware version on boot |
-| `READY\n` | Arduino ready for commands |
-| `RX:<len>:<hex>\n` | Received I2C message (length in decimal, data in hex) |
-| `TX:OK\n` | I2C transmission acknowledged |
-| `TX:ERR:INVALID_HEX\n` | Invalid hex string |
-| `TX:ERR:TOO_LONG\n` | Message exceeds 128 bytes |
-| `PONG\n` | Response to PING |
-
-**Example - Received 78-byte status message:**
-```
-RX:78:17090000001709...4F\n
-```
-
-### Protocol Logic
-
-All spa protocol logic (GO responses, command encoding, status parsing) runs on the ESP32 in `spa_protocol.h`. This allows OTA updates without physical access to the spa.
+| Call | Description |
+|------|-------------|
+| `id(spa).request_status()` | Send a GO immediately, prompting a fresh handshake and status dump |
+| `id(spa).recover_link()` | Reinitialise the link: I2C peripheral reset (direct mode) or Arduino reset pulse (proxy mode) |
+| `id(spa).reset_arduino()` | Alias of `recover_link()`, kept so older configs keep working |
 
 ---
 
@@ -667,6 +573,150 @@ TEMP_RAW = (temperature_celsius × 18) - 512
 
 ---
 
+## Legacy: Arduino I2C Proxy
+
+The original build put an Arduino Nano between the ESP32 and the spa: the Nano did the I2C, the ESP32 did the protocol, and the two talked over UART. That still works and is still supported by the component - `esphome/spa-controller-arduino-proxy.yaml` is a ready-to-use config.
+
+The direct wiring exists because the proxy has one structural weakness: two processors that must agree on the state of the bus. If the spa restarts and the Arduino does not (or the other way round), the link stays dead until something resets the proxy. With the ESP32 on the bus itself there is no second processor to fall out of sync.
+
+### Migrating to direct I2C
+
+1. Remove the `uart:` block and the `reset_pin:` line from your config.
+2. Add `sda:` and `scl:` to `gecko_spa:`.
+3. Rewire: the level converter's HV side goes where the Arduino's A4/A5/GND went, its LV side to the ESP32's SDA/SCL/3V3/GND.
+4. Flash and unplug the Arduino.
+
+Buttons calling `id(spa).reset_arduino()` keep working - it is now an alias for `recover_link()`.
+
+### Flashing the Arduino Nano
+
+**Option A: Use the precompiled binary (recommended)**
+
+Download `arduino-i2c-proxy-atmega328p.hex` from the [GitHub Releases](https://github.com/zteifel/esphome-gecko/releases) page (or from the `arduino/` folder).
+
+```bash
+# Install avrdude (Ubuntu/Debian)
+sudo apt install avrdude
+
+# For Nano Clone (new bootloader) - 115200 baud
+avrdude -v -patmega328p -carduino -P/dev/ttyUSB0 -b115200 -D -Uflash:w:arduino-i2c-proxy-atmega328p.hex:i
+
+# For Original Arduino Nano (old bootloader) - 57600 baud
+avrdude -v -patmega328p -carduino -P/dev/ttyUSB0 -b57600 -D -Uflash:w:arduino-i2c-proxy-atmega328p.hex:i
+```
+
+> **Tip:** Most cheap Nano clones from AliExpress/Amazon use the new bootloader (115200 baud). If upload fails, try 57600 baud for original Nanos with the old bootloader.
+
+**Option B: Build from source with PlatformIO**
+
+The Arduino Wire library has a default 32-byte I2C buffer, but the spa sends messages up to 78 bytes. You **must** patch the Wire library to increase this buffer.
+
+1. `pip install platformio`
+2. `cd arduino && pio run` to download dependencies
+3. Edit `~/.platformio/packages/framework-arduino-avr/libraries/Wire/src/utility/twi.h` and change `#define TWI_BUFFER_LENGTH 32` to `128`
+4. `pio run -t upload`
+
+> **Why is patching needed?** The `-DTWI_BUFFER_LENGTH=128` build flag in `platformio.ini` should override this value, but some PlatformIO versions do not apply it correctly. Patching the source file directly ensures the buffer is always 128 bytes.
+
+### Proxy Wiring
+
+#### ESP32-S2 to Arduino Nano Clone (UART + Reset)
+
+| ESP32-S2 Pin | Arduino Nano Clone Pin | Notes |
+|--------------|------------------|-------|
+| GPIO5 (TX) | RX (D0) | Direct connection (3.3V -> 5V tolerant) |
+| GPIO16 (RX) | TX (D1) | Via voltage divider (5V -> 3.3V) |
+| GPIO17 | RST | Arduino reset (directly, no resistor needed) |
+| GND | GND | Common ground required |
+
+```
+Arduino TX (D1) ----[2.7kΩ]----+---- ESP32 GPIO16 (RX)
+                               |
+                            [5.6kΩ]
+                               |
+                              GND
+```
+
+Output voltage: ~2.7V (within ESP32 3.3V logic threshold)
+
+#### Arduino Nano Clone to Spa I2C Bus
+
+| Arduino Nano Clone Pin | Spa Connector | Notes |
+|------------------|---------------|-------|
+| A4 (SDA) | SDA | I2C Data |
+| A5 (SCL) | SCL | I2C Clock |
+| GND | GND | Common ground |
+
+**Important:** Do NOT connect Arduino VCC to spa - power the Arduino separately via USB or an external supply.
+
+<img src="./pictures/arduino_nano_pinout.webp" width="350">
+
+### Proxy Configuration
+
+```yaml
+uart:
+  id: arduino_uart
+  tx_pin: GPIO5
+  rx_pin: GPIO16
+  baud_rate: 115200
+  rx_buffer_size: 512
+
+gecko_spa:
+  id: spa
+  uart_id: arduino_uart
+  reset_pin: GPIO17  # Resets the Arduino automatically on disconnect
+```
+
+### UART Proxy Protocol
+
+#### Overview
+
+The Arduino acts as a transparent I2C proxy. The ESP32 sends raw I2C bytes as hex strings, and the Arduino forwards them to the I2C bus. Similarly, I2C messages received by the Arduino are sent to the ESP32 as hex strings.
+
+#### Message Format
+
+- **Baud Rate:** 115200
+- **Data Bits:** 8
+- **Parity:** None
+- **Stop Bits:** 1
+- **Line Ending:** `\n` (LF)
+
+#### Commands (ESP32 → Arduino)
+
+| Command | Description |
+|---------|-------------|
+| `TX:<hex>\n` | Send hex bytes to I2C bus at address 0x17 |
+| `PING\n` | Health check |
+
+**Example - Send light ON command:**
+```
+TX:170A0000001709000000000646525101330163\n
+```
+
+#### Responses (Arduino → ESP32)
+
+| Message | Description |
+|---------|-------------|
+| `I2C_PROXY:V1\n` | Firmware version on boot |
+| `READY\n` | Arduino ready for commands |
+| `RX:<len>:<hex>\n` | Received I2C message (length in decimal, data in hex) |
+| `TX:OK\n` | I2C transmission acknowledged |
+| `TX:ERR:INVALID_HEX\n` | Invalid hex string |
+| `TX:ERR:TOO_LONG\n` | Message exceeds 128 bytes |
+| `PONG\n` | Response to PING |
+
+**Example - Received 78-byte status message:**
+```
+RX:78:17090000001709...4F\n
+```
+
+#### Protocol Logic
+
+All spa protocol logic (GO responses, command encoding, status parsing) runs on the ESP32 in `spa_protocol.h`. This allows OTA updates without physical access to the spa.
+
+---
+
+
 ## TODO
 
 - Scheduling of economy intervals and filter cycles in programs (decoding of i2c protocol complete)
@@ -675,24 +725,43 @@ TEMP_RAW = (temperature_celsius × 18) - 512
 
 ## Troubleshooting
 
-### Arduino Hangs After Receiving I2C
+Set `logger: level: DEBUG` and watch the boot log. `dump_config()` prints the transport in use, the pins, the address, and whether I2C slave mode came up.
 
-- **Most common cause:** I2C buffer too small. The Wire library defaults to 32 bytes, but spa messages are up to 78 bytes. See [Flash the Arduino Nano](#quick-start) for patching instructions or use the precompiled binary.
-- Verify the patch was applied: after patching `twi.h`, the line should read `#define TWI_BUFFER_LENGTH 128`
-- Do NOT use `digitalRead()` on SDA/SCL pins
-- Do NOT use hardware watchdog
+### "Spa Connected" never turns on
 
-### ESP32 Not Receiving UART
+- Check SDA and SCL are not swapped, both through the converter and at the spa connector.
+- Confirm the converter is the MOSFET/BSS138 type. A TXB0104 or a resistor divider cannot drive an open-drain bus and will silently fail here.
+- Confirm HV is tied to the spa's 5V and LV to the ESP32's 3V3. Without both references a BSS138 board passes nothing.
+- Check the ground is common between the ESP32 and the spa.
+- On the Adafruit Feather ESP32-S2, make sure GPIO7 (I2C power) is being driven high - the example config does this.
 
-- Verify voltage divider output is >2.5V
-- Check common ground between Arduino and ESP32
-- Verify correct GPIO pins (GPIO5 TX, GPIO16 RX)
+### `I2C slave mode not up yet` or `bad pin state` in the log
 
-### Spa Not Responding
+The HAL refuses to start slave mode while SDA or SCL is held low. The component keeps retrying with a backoff and runs the standard nine-clock bus recovery each time. If it never clears:
 
-- Ensure GO response sequence is sent within 60 seconds
+- Something is holding a line low - check for a shorted or miswired converter channel.
+- Verify the pull-ups exist on both sides (the spa supplies ~4.7k, the converter board usually 10k).
+
+### `I2C transmit failed` warnings
+
+Occasional failures are normal: the spa is another master on the bus, so arbitration is sometimes lost. The component retries once and the spa resends status regularly. A constant stream of them means the spa is not ACKing address `0x17` - re-check wiring and the `address:` option.
+
+### Commands are accepted but nothing happens
+
+- Ensure the handshake completed: the log should show `Handshake XML: inYT_Cxx.xml` and `Received LO message`. Commands embed the config/status versions learned there.
+- Press **Refresh Spa Status** to force a GO and a fresh handshake.
+
+### Spa Not Responding at all
+
+- Ensure the GO keep-alive is being sent (the log prints `Sent GO keep-alive` every 23s)
 - Verify I2C address 0x17
 - Check I2C pull-up resistors
+
+### Arduino proxy issues (legacy wiring)
+
+- **Arduino hangs after receiving I2C:** the Wire library's 32-byte buffer is too small for the spa's 78-byte messages. See [Flashing the Arduino Nano](#flashing-the-arduino-nano), or use the precompiled binary. After patching `twi.h` the line should read `#define TWI_BUFFER_LENGTH 128`.
+- Do NOT use `digitalRead()` on SDA/SCL pins, and do NOT enable the hardware watchdog.
+- **ESP32 not receiving UART:** verify voltage divider output is >2.5V, check the common ground, and verify the GPIO pins.
 
 ---
 

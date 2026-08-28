@@ -31,18 +31,13 @@ ota:
   platform: esphome
   password: !secret ota_password
 
-# UART connection to Arduino I2C Proxy
-uart:
-  id: arduino_uart
-  tx_pin: GPIO5
-  rx_pin: GPIO16
-  baud_rate: 115200
-  rx_buffer_size: 512
-
-# Gecko Spa component
+# Gecko Spa component - direct connection to the spa I2C bus through a
+# bidirectional logic level converter. GPIO3/GPIO4 are the pins labelled
+# SDA/SCL on the Feather ESP32-S2.
 gecko_spa:
   id: spa
-  uart_id: arduino_uart
+  sda: GPIO3
+  scl: GPIO4
 
 # Climate control
 climate:
@@ -60,7 +55,7 @@ switch:
 
   - platform: gecko_spa
     gecko_spa_id: spa
-    type: pump
+    type: pump1
     name: "Spa Pump"
     icon: "mdi:pump"
 
@@ -92,7 +87,7 @@ binary_sensor:
     icon: "mdi:connection"
     device_class: connectivity
 
-# Optional: Button to manually request status
+# Optional: buttons to refresh status and to kick the bus if it ever wedges
 button:
   - platform: template
     name: "Refresh Spa Status"
@@ -100,3 +95,10 @@ button:
     on_press:
       - lambda: |-
           id(spa).request_status();
+
+  - platform: template
+    name: "Reconnect Spa Bus"
+    icon: "mdi:restart"
+    on_press:
+      - lambda: |-
+          id(spa).recover_link();

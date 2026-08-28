@@ -2,17 +2,31 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
 from esphome.components import uart
-from esphome.const import CONF_ID
+from esphome.const import (
+    CONF_ADDRESS,
+    CONF_FREQUENCY,
+    CONF_ID,
+    CONF_SCL,
+    CONF_SDA,
+)
+from esphome.core import CORE
 
-DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["climate", "switch", "select", "binary_sensor", "text_sensor"]
 
 CONF_UART_ID = "uart_id"
 CONF_RESET_PIN = "reset_pin"
+CONF_I2C_BUS = "i2c_bus"
 CONF_NOTIF_DATE_FORMAT = "notif_date_format"
+CONF_UART_TRANSPORT_ID = "uart_transport_id"
+CONF_I2C_TRANSPORT_ID = "i2c_transport_id"
 
 gecko_spa_ns = cg.esphome_ns.namespace("gecko_spa")
-GeckoSpa = gecko_spa_ns.class_("GeckoSpa", cg.Component, uart.UARTDevice)
+GeckoSpa = gecko_spa_ns.class_("GeckoSpa", cg.Component)
+GeckoTransport = gecko_spa_ns.class_("GeckoTransport")
+GeckoUartTransport = gecko_spa_ns.class_(
+    "GeckoUartTransport", GeckoTransport, uart.UARTDevice
+)
+GeckoI2cTransport = gecko_spa_ns.class_("GeckoI2cTransport", GeckoTransport)
 
 NotifDateFormat = gecko_spa_ns.enum("NotifDateFormat", is_class=True)
 NOTIF_DATE_FORMATS = {
@@ -20,26 +34,95 @@ NOTIF_DATE_FORMATS = {
     "D-M-Y": NotifDateFormat.D_M_Y,
 }
 
-CONFIG_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(GeckoSpa),
-        cv.GenerateID(CONF_UART_ID): cv.use_id(uart.UARTComponent),
-        cv.Optional(CONF_RESET_PIN): pins.gpio_output_pin_schema,
-        cv.Optional(CONF_NOTIF_DATE_FORMAT, default="D-M-Y"): cv.enum(NOTIF_DATE_FORMATS, upper=True),
-    }
-).extend(cv.COMPONENT_SCHEMA)
+I2C_KEYS = (CONF_SDA, CONF_SCL)
+
+
+def _validate_transport(config):
+    """Pick between the Arduino proxy and driving the spa bus directly."""
+    uses_uart = CONF_UART_ID in config
+    uses_i2c = any(key in config for key in I2C_KEYS)
+
+    if uses_uart and uses_i2c:
+        raise cv.Invalid(
+            f"Use either '{CONF_UART_ID}' (Arduino proxy) or "
+            f"'{CONF_SDA}'/'{CONF_SCL}' (direct I2C), not both"
+        )
+    if not uses_uart and not uses_i2c:
+        raise cv.Invalid(
+            f"Set '{CONF_SDA}' and '{CONF_SCL}' to drive the spa bus directly, or "
+            f"'{CONF_UART_ID}' to talk through an Arduino I2C proxy"
+        )
+
+    if uses_uart:
+        return config
+
+    for key in I2C_KEYS:
+        if key not in config:
+            raise cv.Invalid(f"'{key}' is required when using direct I2C", path=[key])
+    if CONF_RESET_PIN in config:
+        raise cv.Invalid(
+            f"'{CONF_RESET_PIN}' resets the Arduino proxy and has no meaning in "
+            "direct I2C mode",
+            path=[CONF_RESET_PIN],
+        )
+    if not CORE.is_esp32:
+        raise cv.Invalid("Direct I2C mode requires an ESP32")
+    if not CORE.using_arduino:
+        # Slave-mode I2C is only reachable through the Arduino core's HAL.
+        raise cv.Invalid(
+            "Direct I2C mode requires 'framework: type: arduino' on the esp32 platform"
+        )
+    if config[CONF_SDA] == config[CONF_SCL]:
+        raise cv.Invalid(f"'{CONF_SDA}' and '{CONF_SCL}' must be different pins")
+    return config
+
+
+CONFIG_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(GeckoSpa),
+            cv.GenerateID(CONF_UART_TRANSPORT_ID): cv.declare_id(GeckoUartTransport),
+            cv.GenerateID(CONF_I2C_TRANSPORT_ID): cv.declare_id(GeckoI2cTransport),
+            # Arduino I2C proxy over UART (legacy wiring)
+            cv.Optional(CONF_UART_ID): cv.use_id(uart.UARTComponent),
+            cv.Optional(CONF_RESET_PIN): pins.gpio_output_pin_schema,
+            # Direct connection to the spa I2C bus (no Arduino)
+            cv.Optional(CONF_SDA): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_SCL): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_I2C_BUS, default=0): cv.int_range(min=0, max=1),
+            cv.Optional(CONF_ADDRESS, default=0x17): cv.i2c_address,
+            cv.Optional(CONF_FREQUENCY, default="100kHz"): cv.All(
+                cv.frequency, cv.Range(min=10000, max=400000)
+            ),
+            cv.Optional(CONF_NOTIF_DATE_FORMAT, default="D-M-Y"): cv.enum(
+                NOTIF_DATE_FORMATS, upper=True
+            ),
+        }
+    ).extend(cv.COMPONENT_SCHEMA),
+    _validate_transport,
+)
 
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    uart_component = await cg.get_variable(config[CONF_UART_ID])
-    cg.add(var.set_uart_parent(uart_component))
+    if CONF_UART_ID in config:
+        cg.add_define("USE_GECKO_SPA_UART")
+        transport = cg.new_Pvariable(config[CONF_UART_TRANSPORT_ID])
+        uart_component = await cg.get_variable(config[CONF_UART_ID])
+        cg.add(transport.set_uart_parent(uart_component))
+        if CONF_RESET_PIN in config:
+            pin = await cg.gpio_pin_expression(config[CONF_RESET_PIN])
+            cg.add(transport.set_reset_pin(pin))
+    else:
+        cg.add_define("USE_GECKO_SPA_I2C")
+        transport = cg.new_Pvariable(config[CONF_I2C_TRANSPORT_ID])
+        cg.add(transport.set_sda_pin(config[CONF_SDA]))
+        cg.add(transport.set_scl_pin(config[CONF_SCL]))
+        cg.add(transport.set_bus_num(config[CONF_I2C_BUS]))
+        cg.add(transport.set_address(config[CONF_ADDRESS]))
+        cg.add(transport.set_frequency(int(config[CONF_FREQUENCY])))
 
-    if CONF_RESET_PIN in config:
-        pin = await cg.gpio_pin_expression(config[CONF_RESET_PIN])
-        cg.add(var.set_reset_pin(pin))
-
-    if CONF_NOTIF_DATE_FORMAT in config:
-        cg.add(var.set_notif_date_format(config[CONF_NOTIF_DATE_FORMAT]))
+    cg.add(var.set_transport(transport))
+    cg.add(var.set_notif_date_format(config[CONF_NOTIF_DATE_FORMAT]))

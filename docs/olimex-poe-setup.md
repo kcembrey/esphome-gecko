@@ -1,6 +1,6 @@
 # Olimex ESP32-POE-ISO-IND Setup Guide
 
-This is an addon guide for using the **Olimex ESP32-POE-ISO-IND** instead of the Adafruit ESP32-S2. For general setup (Arduino flashing, secrets, Home Assistant entities, protocol details), see the [main README](../README.md).
+This is an addon guide for using the **Olimex ESP32-POE-ISO-IND** instead of the Adafruit ESP32-S2. For general setup (level converter choice, secrets, Home Assistant entities, protocol details), see the [main README](../README.md).
 
 ## Why Olimex?
 
@@ -18,8 +18,7 @@ The Olimex ESP32-POE-ISO-IND provides **Power over Ethernet (PoE)** with galvani
 | Component | Description | Notes |
 |-----------|-------------|-------|
 | Olimex ESP32-POE-ISO-IND | PoE Ethernet microcontroller | Replaces Adafruit ESP32-S2 |
-| Arduino Nano Clone | I2C bridge | Same as main guide |
-| Voltage Divider Resistors | 2.7k + 5.6k | Level shifting Arduino TX to Olimex RX |
+| Bidirectional logic level converter | 3.3V <-> 5V, MOSFET/BSS138 type | Same as main guide |
 | Ethernet Cable | Cat5e or better | Connects to PoE switch/injector |
 | PoE Switch or Injector | 802.3af | Powers the Olimex board |
 
@@ -29,65 +28,53 @@ Several GPIOs on the Olimex board are reserved for the Ethernet PHY (LAN8720) an
 
 **Reserved pins (do NOT use):** GPIO0, GPIO5, GPIO12, GPIO17, GPIO18, GPIO19, GPIO21, GPIO22, GPIO23, GPIO25, GPIO26, GPIO27
 
-### Olimex to Arduino Nano (UART + Reset)
+### Olimex to Level Converter (low-voltage side)
 
-| Olimex Pin | Arduino Nano Pin | Notes |
-|------------|------------------|-------|
-| GPIO4 (TX) | RX (D0) | Direct connection (3.3V is 5V tolerant on Arduino) |
-| GPIO36 (RX) | TX (D1) | Via voltage divider (5V to 3.3V) |
-| GPIO14 (RST) | RST | Arduino reset (active-LOW, has internal pull-up) |
+The UEXT connector's I2C pair is GPIO13/GPIO16, but GPIO16 is taken by PSRAM on the WROVER module. GPIO13 and GPIO14 are both free on the extension header and both can drive open-drain outputs, so those are what the example config uses.
+
+| Olimex Pin | Converter Pin | Notes |
+|------------|---------------|-------|
+| GPIO13 (SDA) | LV1 | I2C data, 3.3V side |
+| GPIO14 (SCL) | LV2 | I2C clock, 3.3V side |
+| 3.3V | LV | Reference voltage for the low side |
 | GND | GND | Common ground required |
 
-### Voltage Divider Circuit (Arduino TX to Olimex RX)
-
-```
-Arduino TX (D1) ----[2.7k]----+---- Olimex GPIO36 (RX)
-                               |
-                            [5.6k]
-                               |
-                              GND
-```
-
-Output voltage: ~2.7V (within ESP32 3.3V logic threshold)
-
-### Arduino Nano to Spa I2C Bus
+### Level Converter to Spa (high-voltage side)
 
 Same as the main guide - see [Hardware Build](../README.md#hardware-build).
 
-| Arduino Nano Pin | Spa Connector | Notes |
-|------------------|---------------|-------|
-| A4 (SDA) | SDA | I2C Data |
-| A5 (SCL) | SCL | I2C Clock |
+| Converter Pin | Spa Connector | Notes |
+|---------------|---------------|-------|
+| HV1 | SDA | I2C Data |
+| HV2 | SCL | I2C Clock |
+| HV | 5V | Reference voltage for the high side |
 | GND | GND | Common ground |
 
 ## Wiring Diagram
 
 ```
-                    +------------------+
-                    |    Gecko Spa     |
-                    |   Motherboard    |
-                    |                  |
-                    |  SDA  SCL  GND   |
-                    +---+----+----+---+
-                        |    |    |
-    +-------------------+----+----+---------------------+
-    |                   |    |    |                      |
-    |  +----------------+----+----+-------------------+  |
-    |  |             Arduino Nano Clone               |  |
-    |  |                                              |  |
-    |  |  A4(SDA)  A5(SCL)  GND   TX(D1)  RX(D0) RST |  |
-    |  +-------------------------------+------+----+--+  |
-    |                          |       |      |    |     |
-    |                          |    [2.7k]    |    |     |
-    |                          |       |      |    |     |
-    |                          +-[5.6k]+      |    |     |
-    |                          |       |      |    |     |
-    |  +-----------------------+-------+------+----+--+  |
-    |  |                      GND  GPIO36  GPIO4 GPIO14|  |
-    |  |                                               |  |
-    |  |          Olimex ESP32-POE-ISO-IND             |  |
-    |  |               [Ethernet/PoE]                  |  |
-    |  +-----------------------------------------------+  |
+                    +-------------------+
+                    |    Gecko Spa      |
+                    |   Motherboard     |
+                    |                   |
+                    |  SDA  SCL  5V GND |
+                    +---+----+----+--+--+
+                        |    |    |  |
+    +-------------------+----+----+--+--------------------+
+    |                   |    |    |  |                    |
+    |  +----------------+----+----+--+-----------------+  |
+    |  |  HV1  HV2   HV  GND                           |  |
+    |  |            Logic Level Converter              |  |
+    |  |              (BSS138, bidirectional)          |  |
+    |  |  LV1  LV2   LV  GND                           |  |
+    |  +---+----+-----+---+---------------------------+   |
+    |      |    |     |   |                               |
+    |  +---+----+-----+---+---------------------------+   |
+    |  |GPIO13 GPIO14 3.3V GND                        |   |
+    |  |(SDA)  (SCL)                                  |   |
+    |  |          Olimex ESP32-POE-ISO-IND            |   |
+    |  |               [Ethernet/PoE]                 |   |
+    |  +----------------------------------------------+   |
     |                                                     |
     +-----------------------------------------------------+
 ```
@@ -114,25 +101,16 @@ ethernet:
   power_pin: GPIO12
 ```
 
-### UART Pins
-
-```yaml
-uart:
-  id: arduino_uart
-  tx_pin: GPIO4      # Was GPIO5 on ESP32-S2
-  rx_pin: GPIO36     # Was GPIO16 on ESP32-S2
-  baud_rate: 115200
-  rx_buffer_size: 512
-```
-
-### Reset Pin
+### I2C Pins
 
 ```yaml
 gecko_spa:
   id: spa
-  uart_id: arduino_uart
-  reset_pin: GPIO14   # Was GPIO17 on ESP32-S2
+  sda: GPIO13   # Was GPIO3 on ESP32-S2
+  scl: GPIO14   # Was GPIO4 on ESP32-S2
 ```
+
+Unlike the ESP32-S2 config, no GPIO7 I2C-power switch is needed here - the Olimex board has no such gate.
 
 ### Full Config
 
@@ -154,7 +132,7 @@ esphome upload spa-controller-olimex.yaml
 
 | Function | ESP32-S2 (Adafruit) | ESP32-POE-ISO (Olimex) | Why changed |
 |----------|---------------------|------------------------|-------------|
-| UART TX | GPIO5 | GPIO4 | GPIO5 used by Ethernet PHY reset |
-| UART RX | GPIO16 | GPIO36 | GPIO16 used by PSRAM (WROVER) |
-| Arduino RST | GPIO17 | GPIO14 | GPIO17 used by Ethernet PHY clock |
+| I2C SDA | GPIO3 | GPIO13 | Different board pinout; GPIO13 is free on the extension header |
+| I2C SCL | GPIO4 | GPIO14 | GPIO16 (the UEXT SCL) is used by PSRAM (WROVER) |
+| I2C pull-up power | GPIO7 | n/a | Feather-specific gate, no equivalent on the Olimex |
 | Network | WiFi | Ethernet (PoE) | Board feature |

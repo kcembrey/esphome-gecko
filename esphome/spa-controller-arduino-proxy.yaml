@@ -1,5 +1,6 @@
-# Olimex ESP32-POE-ISO wired straight to the spa I2C bus through a
-# bidirectional (MOSFET) logic level converter. No Arduino in the middle.
+# Legacy wiring: ESP32-S2 -> Arduino Nano I2C proxy -> spa.
+# Kept for existing builds. New builds should use spa-controller.yaml, which
+# talks to the spa bus directly through a logic level converter.
 
 substitutions:
   device_name: spa-controller
@@ -9,7 +10,7 @@ esphome:
   friendly_name: Spa Controller
 
 esp32:
-  board: esp32-poe-iso
+  board: featheresp32-s2
   framework:
     type: arduino
 
@@ -23,14 +24,9 @@ logger:
   level: DEBUG
   baud_rate: 0
 
-# Ethernet (PoE) - replaces WiFi
-ethernet:
-  type: LAN8720
-  mdc_pin: GPIO23
-  mdio_pin: GPIO18
-  clk_mode: GPIO17_OUT
-  phy_addr: 0
-  power_pin: GPIO12
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
 
 api:
   encryption:
@@ -46,14 +42,19 @@ time:
     id: ha_time
     timezone: Europe/Stockholm
 
-# Gecko Spa component - direct connection to the spa I2C bus.
-# NOTE: GPIO17 is used by Ethernet, GPIO5 by PHY reset, GPIO16 by PSRAM (WROVER),
-# so the UEXT I2C pair is not usable as-is. GPIO13/GPIO14 are free on the
-# extension header and both can drive open-drain outputs.
+# UART connection to Arduino I2C Proxy
+uart:
+  id: arduino_uart
+  tx_pin: GPIO5
+  rx_pin: GPIO16
+  baud_rate: 115200
+  rx_buffer_size: 512
+
+# Gecko Spa component
 gecko_spa:
   id: spa
-  sda: GPIO13
-  scl: GPIO14
+  uart_id: arduino_uart
+  reset_pin: GPIO17  # Resets Arduino automatically on disconnect
   notif_date_format: D-M-Y  # Change to Y-M-D if dates for reminders don't look right
 
 # Climate control
@@ -215,6 +216,7 @@ sensor:
       if (sscanf(due.c_str(), "%d-%d-%d", &y, &m, &d) != 3) return NAN;
       auto now = id(ha_time).now();
       if (!now.is_valid()) return NAN;
+      // Calculate days difference
       int due_days = y*365 + m*30 + d;
       int now_days = now.year*365 + now.month*30 + now.day_of_month;
       return (float)(due_days - now_days);
@@ -267,6 +269,10 @@ sensor:
       int now_days = now.year*365 + now.month*30 + now.day_of_month;
       return (float)(due_days - now_days);
 
+  - platform: wifi_signal
+    name: "Spa WiFi Signal"
+    update_interval: 60s
+
 # Buttons
 button:
   - platform: template
@@ -277,8 +283,8 @@ button:
           id(spa).request_status();
 
   - platform: template
-    name: "Reconnect Spa Bus"
+    name: "Reset Arduino"
     icon: "mdi:restart"
     on_press:
       - lambda: |-
-          id(spa).recover_link();
+          id(spa).reset_arduino();

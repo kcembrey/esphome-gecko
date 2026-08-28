@@ -5,7 +5,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
 #include "esphome/core/preferences.h"
-#include "esphome/components/uart/uart.h"
+#include "gecko_transport.h"
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/select/select.h"
@@ -69,11 +69,17 @@ enum class NotifDateFormat : uint8_t {
   D_M_Y = 1
 };
 
-class GeckoSpa : public Component, public uart::UARTDevice {
+class GeckoSpa : public Component {
  public:
   void setup() override;
   void loop() override;
+  void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
+
+  // The transport owns the link to the spa: either an Arduino proxy over UART
+  // or the ESP32's own I2C peripheral. Everything above this line is identical
+  // either way.
+  void set_transport(GeckoTransport *transport) { transport_ = transport; }
 
   // Entity setters - switches (controllable)
   void set_light_switch(switch_::Switch *sw) { light_switch_ = sw; }
@@ -105,7 +111,6 @@ class GeckoSpa : public Component, public uart::UARTDevice {
   void set_lock_mode_sensor(text_sensor::TextSensor *s) { lock_mode_sensor_ = s; }
   void set_pack_type_sensor(text_sensor::TextSensor *s) { pack_type_sensor_ = s; }
   void set_pump_timer_sensor(sensor::Sensor *s) { pump_timer_sensor_ = s; }
-  void set_reset_pin(GPIOPin *pin) { reset_pin_ = pin; }
   void set_notif_date_format(NotifDateFormat format) { notif_date_format_ = format; }
 
   // Command methods
@@ -118,7 +123,11 @@ class GeckoSpa : public Component, public uart::UARTDevice {
   void send_program_command(uint8_t prog);
   void send_temperature_command(float temp_c);
   void request_status();
-  void reset_arduino();
+  // Force the link back up: resets the Arduino proxy, or reinitialises the I2C
+  // peripheral when talking to the spa directly.
+  void recover_link();
+  // Kept so existing configurations that call id(spa).reset_arduino() still work.
+  void reset_arduino() { this->recover_link(); }
 
   // State getters
   bool get_light_state() { return light_state_; }
@@ -157,7 +166,7 @@ class GeckoSpa : public Component, public uart::UARTDevice {
   text_sensor::TextSensor *lock_mode_sensor_{nullptr};
   text_sensor::TextSensor *pack_type_sensor_{nullptr};
   sensor::Sensor *pump_timer_sensor_{nullptr};
-  GPIOPin *reset_pin_{nullptr};
+  GeckoTransport *transport_{nullptr};
   NotifDateFormat notif_date_format_{NotifDateFormat::D_M_Y};
 
   // State
@@ -182,20 +191,14 @@ class GeckoSpa : public Component, public uart::UARTDevice {
   float actual_temp_{0};
   uint32_t last_i2c_time_{0};
   uint32_t last_go_send_time_{0};
-  uint32_t reset_start_time_{0};
-  bool reset_in_progress_{false};
-  uint8_t reset_retry_count_{0};        // Number of consecutive resets without recovery
-  bool arduino_ready_{false};           // True after Arduino sends READY
+  uint32_t last_recovery_time_{0};
+  uint8_t recovery_retry_count_{0};     // Consecutive recovery attempts without traffic
   char notification_date_[4][12]{ "", "", "", ""};
 
   // Version tracking (parsed from handshake XML filenames)
   uint8_t config_version_{0};   // e.g., 82 from inYT_C82.xml
   uint8_t status_version_{0};   // e.g., 81 from inYT_S81.xml
   const GeckoLogOffsets *log_offsets_{&GECKO_LOG_OFFSETS_V51};  // Default to v51+
-
-  // UART buffer
-  char uart_buffer_[512];
-  uint16_t uart_pos_{0};
 
   // Multi-part message buffer (byte[10]=0x01 means more coming, 0x00 means last)
   uint8_t msg_buffer_[512];
@@ -211,8 +214,6 @@ class GeckoSpa : public Component, public uart::UARTDevice {
 
   uint8_t calc_checksum(const uint8_t *data, uint8_t len);
   void send_i2c_message(const uint8_t *data, uint8_t len);
-  uint8_t hex_to_byte(char high, char low);
-  void process_proxy_message(const char *msg);
   void process_i2c_message(const uint8_t *data, uint8_t len);
   void parse_status_message(const uint8_t *data);
   void parse_notification_message(const uint8_t *data);

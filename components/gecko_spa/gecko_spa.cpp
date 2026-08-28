@@ -1,5 +1,6 @@
 #include "gecko_spa.h"
 #include "esphome/core/log.h"
+#include <algorithm>
 #include <ctime>
 
 namespace esphome {
@@ -15,35 +16,28 @@ const uint8_t GeckoSpa::GO_MESSAGE[15] = {
 
 void GeckoSpa::setup() {
   ESP_LOGI(TAG, "GeckoSpa starting");
-  if (reset_pin_) {
-    reset_pin_->setup();
-    reset_pin_->digital_write(true);  // RST is active LOW, keep HIGH
+  if (transport_ == nullptr) {
+    ESP_LOGE(TAG, "No transport configured");
+    this->mark_failed();
+    return;
   }
+  transport_->set_frame_callback([this](const uint8_t *data, uint8_t len) { this->process_i2c_message(data, len); });
+  transport_->setup_transport();
+}
+
+void GeckoSpa::dump_config() {
+  ESP_LOGCONFIG(TAG, "Gecko Spa:");
+  if (transport_ != nullptr)
+    transport_->dump_transport_config();
+  ESP_LOGCONFIG(TAG, "  Notification date format: %s",
+                notif_date_format_ == NotifDateFormat::Y_M_D ? "Y-M-D" : "D-M-Y");
 }
 
 void GeckoSpa::loop() {
-  // Handle non-blocking reset pulse completion (100ms)
-  if (reset_in_progress_ && (millis() - reset_start_time_ > 100)) {
-    if (reset_pin_) {
-      reset_pin_->digital_write(true);  // Release reset (HIGH)
-    }
-    reset_in_progress_ = false;
-    ESP_LOGI(TAG, "Arduino reset complete");
-  }
+  if (transport_ == nullptr)
+    return;
 
-  // Read UART lines from Arduino proxy
-  while (available()) {
-    char c = read();
-    if (c == '\n' || c == '\r') {
-      if (uart_pos_ > 0) {
-        uart_buffer_[uart_pos_] = '\0';
-        process_proxy_message(uart_buffer_);
-        uart_pos_ = 0;
-      }
-    } else if (uart_pos_ < sizeof(uart_buffer_) - 1) {
-      uart_buffer_[uart_pos_++] = c;
-    }
-  }
+  transport_->loop_transport();
 
   // Check connection timeout (1 minute without I2C traffic)
   if (millis() - last_i2c_time_ > 60000) {
@@ -52,16 +46,15 @@ void GeckoSpa::loop() {
       if (connected_sensor_)
         connected_sensor_->publish_state(false);
       ESP_LOGW(TAG, "Spa connection lost (timeout)");
-      reset_retry_count_ = 0;
-      reset_arduino();
-    } else if (!reset_in_progress_) {
-      // Not connected and not mid-reset: retry with backoff
+      recovery_retry_count_ = 0;
+      this->recover_link();
+    } else if (!transport_->recovery_in_progress()) {
+      // Not connected and not mid-recovery: retry with backoff
       // Retry intervals: 30s, 60s, 120s, then every 120s (max 5 retries before giving up)
-      uint32_t backoff = 30000UL * (1 << std::min(reset_retry_count_, (uint8_t)2));
-      if (reset_retry_count_ < 5 && (millis() - reset_start_time_ > backoff)) {
-        ESP_LOGW(TAG, "Arduino recovery retry %d/%d (backoff %ds)",
-                 reset_retry_count_ + 1, 5, backoff / 1000);
-        reset_arduino();
+      uint32_t backoff = 30000UL * (1 << std::min(recovery_retry_count_, (uint8_t) 2));
+      if (recovery_retry_count_ < 5 && (millis() - last_recovery_time_ > backoff)) {
+        ESP_LOGW(TAG, "Link recovery retry %d/%d (backoff %ds)", recovery_retry_count_ + 1, 5, backoff / 1000);
+        this->recover_link();
       }
     }
   }
@@ -177,24 +170,18 @@ void GeckoSpa::send_temperature_command(float temp_c) {
 }
 
 void GeckoSpa::request_status() {
-  write_str("PING\n");
+  // A GO makes the spa restart the handshake and push a fresh status dump.
+  last_go_send_time_ = millis();
+  send_i2c_message(GO_MESSAGE, 15);
+  ESP_LOGI(TAG, "Requested status refresh");
 }
 
-void GeckoSpa::reset_arduino() {
-  if (!reset_pin_) {
-    ESP_LOGW(TAG, "Reset pin not configured");
+void GeckoSpa::recover_link() {
+  if (transport_ == nullptr)
     return;
-  }
-  if (reset_in_progress_) {
-    ESP_LOGD(TAG, "Reset already in progress");
-    return;
-  }
-  ESP_LOGI(TAG, "Resetting Arduino (attempt %d)", reset_retry_count_ + 1);
-  arduino_ready_ = false;
-  reset_pin_->digital_write(false);  // Pull LOW to reset
-  reset_start_time_ = millis();
-  reset_in_progress_ = true;
-  reset_retry_count_++;
+  last_recovery_time_ = millis();
+  recovery_retry_count_++;
+  transport_->recover_link();
 }
 
 uint8_t GeckoSpa::calc_checksum(const uint8_t *data, uint8_t len) {
@@ -206,59 +193,8 @@ uint8_t GeckoSpa::calc_checksum(const uint8_t *data, uint8_t len) {
 }
 
 void GeckoSpa::send_i2c_message(const uint8_t *data, uint8_t len) {
-  write_str("TX:");
-  for (uint8_t i = 0; i < len; i++) {
-    char hex[3];
-    sprintf(hex, "%02X", data[i]);
-    write_str(hex);
-  }
-  write_str("\n");
-}
-
-uint8_t GeckoSpa::hex_to_byte(char high, char low) {
-  auto nibble = [](char c) -> uint8_t {
-    if (c >= '0' && c <= '9')
-      return c - '0';
-    if (c >= 'A' && c <= 'F')
-      return c - 'A' + 10;
-    if (c >= 'a' && c <= 'f')
-      return c - 'a' + 10;
-    return 0;
-  };
-  return (nibble(high) << 4) | nibble(low);
-}
-
-void GeckoSpa::process_proxy_message(const char *msg) {
-  ESP_LOGD(TAG, "Proxy: %s", msg);
-
-  // RX:<len>:<hex>
-  if (strncmp(msg, "RX:", 3) == 0) {
-    const char *p = msg + 3;
-    int len = atoi(p);
-
-    // Find the colon after length
-    while (*p && *p != ':')
-      p++;
-    if (*p == ':')
-      p++;
-
-    // Decode hex to bytes
-    uint8_t data[128];
-    for (int i = 0; i < len && i < 128; i++) {
-      data[i] = hex_to_byte(p[i * 2], p[i * 2 + 1]);
-    }
-
-    process_i2c_message(data, len);
-  } else if (strcmp(msg, "READY") == 0) {
-    ESP_LOGI(TAG, "Arduino proxy ready");
-    arduino_ready_ = true;
-  } else if (strcmp(msg, "I2C_PROXY:V1") == 0) {
-    ESP_LOGI(TAG, "Arduino proxy version 1");
-  } else if (strcmp(msg, "TX:OK") == 0) {
-    ESP_LOGD(TAG, "I2C TX acknowledged");
-  } else if (strcmp(msg, "PONG") == 0) {
-    ESP_LOGD(TAG, "Proxy ping OK");
-  }
+  if (transport_ != nullptr)
+    transport_->send_frame(data, len);
 }
 
 void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
@@ -266,7 +202,7 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
   last_i2c_time_ = millis();
   if (!connected_) {
     connected_ = true;
-    reset_retry_count_ = 0;
+    recovery_retry_count_ = 0;
     if (connected_sensor_)
       connected_sensor_->publish_state(true);
     ESP_LOGI(TAG, "Spa connected (I2C traffic detected)");
