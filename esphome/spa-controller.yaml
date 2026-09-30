@@ -1,5 +1,19 @@
-# Adafruit Feather ESP32-S2 wired straight to the spa I2C bus through a
-# bidirectional (MOSFET) logic level converter. No Arduino in the middle.
+# Reference build: Seeed Studio XIAO ESP32-C3 wired straight to the spa's I2C
+# bus through a BSS138 logic level converter. No Arduino in the middle.
+#
+#   XIAO pin   GPIO    Goes to
+#   D0         GPIO2   converter LV1 -> spa SDA
+#   D2         GPIO4   converter LV2 -> spa SCL
+#   3V3                converter LV   (must be 3.3V, never 5V)
+#   GND                converter GND
+#
+# A 220 ohm resistor in series with each I2C line, at the XIAO end, is cheap
+# insurance for the pins - see "Protecting the ESP32 pins" in the README.
+#
+# On a healthy board, D4/D5 (GPIO6/GPIO7, the XIAO's labelled SDA/SCL) are the
+# better choice because they are not strapping pins. This build moved to D0/D2
+# after GPIO6/GPIO7 on the original board were damaged by 5V from the old
+# Arduino proxy wiring.
 
 substitutions:
   device_name: spa-controller
@@ -9,9 +23,40 @@ esphome:
   friendly_name: Spa Controller
 
 esp32:
-  board: featheresp32-s2
+  # The generic C3 board definition works for the XIAO ESP32-C3.
+  board: esp32-c3-devkitm-1
   framework:
+    # Direct I2C needs the Arduino core's I2C slave HAL.
     type: arduino
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Spa Controller Fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+# Time synced from Home Assistant for accurate date calculations
+time:
+  - platform: homeassistant
+    id: ha_time
+    timezone: America/Mexico_City  # Set to yours
 
 # Import Gecko Spa component
 external_components:
@@ -19,35 +64,14 @@ external_components:
       type: local
       path: ../components
 
-logger:
-  level: DEBUG
-  baud_rate: 0
-
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-
-api:
-  encryption:
-    key: !secret api_encryption_key
-
-ota:
-  platform: esphome
-  password: !secret ota_password
-
-# Time synced from Home Assistant for accurate date calculations
-time:
-  - platform: homeassistant
-    id: ha_time
-    timezone: Europe/Stockholm
-
 # Gecko Spa component - direct connection to the spa I2C bus.
-# GPIO3/GPIO4 are the pins labelled SDA/SCL on the Feather.
+# GPIO2 is a strapping pin on the C3, so ESPHome warns about it. The I2C
+# pull-ups hold it high at reset, which is the state it needs.
 gecko_spa:
   id: spa
-  sda: GPIO3
-  scl: GPIO4
-  notif_date_format: D-M-Y  # Change to Y-M-D if dates for reminders don't look right
+  sda: GPIO2  # XIAO D0
+  scl: GPIO4  # XIAO D2
+  notif_date_format: Y-M-D  # Change to D-M-Y if dates for reminders don't look right
 
 # Climate control
 climate:
@@ -55,16 +79,7 @@ climate:
     gecko_spa_id: spa
     name: "Spa"
 
-# Switches
 switch:
-  # The Feather gates power to its on-board I2C pull-ups behind GPIO7. Harmless
-  # when the level converter supplies its own pull-ups, required when it doesn't.
-  - platform: gpio
-    pin: GPIO7
-    id: i2c_power
-    restore_mode: ALWAYS_ON
-    internal: true
-
   - platform: gecko_spa
     gecko_spa_id: spa
     type: light

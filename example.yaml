@@ -6,9 +6,10 @@ esphome:
   friendly_name: Spa Controller
 
 esp32:
-  board: featheresp32-s2
+  # Seeed Studio XIAO ESP32-C3 - the generic C3 definition works for it
+  board: esp32-c3-devkitm-1
   framework:
-    type: arduino
+    type: arduino  # direct I2C needs the Arduino core's I2C slave HAL
 
 # Import Gecko Spa component from GitHub
 external_components:
@@ -17,7 +18,6 @@ external_components:
 
 logger:
   level: DEBUG
-  baud_rate: 0
 
 wifi:
   ssid: !secret wifi_ssid
@@ -32,11 +32,11 @@ ota:
   password: !secret ota_password
 
 # Gecko Spa component - direct connection to the spa I2C bus through a
-# bidirectional logic level converter. GPIO3/GPIO4 are the pins labelled
-# SDA/SCL on the Feather ESP32-S2.
+# bidirectional logic level converter. XIAO D0/D2; see the README's Hardware
+# Build section for why these and not the labelled SDA/SCL (D4/D5).
 gecko_spa:
   id: spa
-  sda: GPIO3
+  sda: GPIO2
   scl: GPIO4
 
 # Climate control

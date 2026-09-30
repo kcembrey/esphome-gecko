@@ -1,6 +1,8 @@
-# Legacy wiring: ESP32-S2 -> Arduino Nano I2C proxy -> spa.
-# Kept for existing builds. New builds should use spa-controller.yaml, which
-# talks to the spa bus directly through a logic level converter.
+# Adafruit Feather ESP32-S2 wired straight to the spa I2C bus through a
+# bidirectional (MOSFET) logic level converter. No Arduino in the middle.
+#
+# Alternative board. spa-controller.yaml (Seeed XIAO ESP32-C3) is the
+# reference build; this one compiles but has not been run against a spa.
 
 substitutions:
   device_name: spa-controller
@@ -42,22 +44,12 @@ time:
     id: ha_time
     timezone: Europe/Stockholm
 
-# UART connection to Arduino I2C Proxy
-uart:
-  id: arduino_uart
-  tx_pin: GPIO5
-  rx_pin: GPIO16
-  baud_rate: 115200
-  rx_buffer_size: 512
-
-# Gecko Spa component
+# Gecko Spa component - direct connection to the spa I2C bus.
+# GPIO3/GPIO4 are the pins labelled SDA/SCL on the Feather.
 gecko_spa:
   id: spa
-  uart_id: arduino_uart
-  # The Nano pulls RST up to 5V: never wire this GPIO straight to RST. Drive RST
-  # through an NPN transistor (and set inverted: true) or a spare BSS138
-  # level-converter channel - see the Legacy section of the README.
-  reset_pin: GPIO17  # Resets Arduino automatically on disconnect
+  sda: GPIO3
+  scl: GPIO4
   notif_date_format: D-M-Y  # Change to Y-M-D if dates for reminders don't look right
 
 # Climate control
@@ -68,6 +60,14 @@ climate:
 
 # Switches
 switch:
+  # The Feather gates power to its on-board I2C pull-ups behind GPIO7. Harmless
+  # when the level converter supplies its own pull-ups, required when it doesn't.
+  - platform: gpio
+    pin: GPIO7
+    id: i2c_power
+    restore_mode: ALWAYS_ON
+    internal: true
+
   - platform: gecko_spa
     gecko_spa_id: spa
     type: light
@@ -286,8 +286,8 @@ button:
           id(spa).request_status();
 
   - platform: template
-    name: "Reset Arduino"
+    name: "Reconnect Spa Bus"
     icon: "mdi:restart"
     on_press:
       - lambda: |-
-          id(spa).reset_arduino();
+          id(spa).recover_link();

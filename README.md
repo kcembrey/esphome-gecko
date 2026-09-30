@@ -1,7 +1,7 @@
 <p align="center"><img src="https://github.com/zteifel/esphome-gecko/blob/master/logo_small.png" alt="Smart Spa Heating" width="400"><img src="https://github.com/zteifel/smart-spa-heating/blob/main/logo_small.png" alt="Smart Spa Heating" width="400"></p>
 
 
-Home Assistant integration for Gecko spa systems. The ESP32 drives the spa's 5V I2C bus directly through a bidirectional logic level converter - no Arduino in the middle. Tested together with a Gecko IN.YE-3-H3.0 (YE-3-CE) spa controller. Feel free to combine with my home assistant integration for smart heating based on electricty price [Smart Spa Heating Integration](https://github.com/zteifel/smart-spa-heating).
+Home Assistant integration for Gecko spa systems. The ESP32 drives the spa's 5V I2C bus directly through a bidirectional logic level converter - no Arduino in the middle. The reference build uses a Seeed Studio XIAO ESP32-C3. Tested together with a Gecko IN.YE-3-H3.0 (YE-3-CE) spa controller. Feel free to combine with my home assistant integration for smart heating based on electricty price [Smart Spa Heating Integration](https://github.com/zteifel/smart-spa-heating).
 
 ## Architecture
 
@@ -67,9 +67,10 @@ esphome:
   friendly_name: Spa Controller
 
 esp32:
-  board: featheresp32-s2
+  # Seeed Studio XIAO ESP32-C3 - the generic C3 definition works for it
+  board: esp32-c3-devkitm-1
   framework:
-    type: arduino
+    type: arduino  # direct I2C needs the Arduino core's I2C slave HAL
 
 # Import Gecko Spa component from GitHub
 external_components:
@@ -78,7 +79,6 @@ external_components:
 
 logger:
   level: DEBUG
-  baud_rate: 0
 
 wifi:
   ssid: !secret wifi_ssid
@@ -93,10 +93,10 @@ ota:
   password: !secret ota_password
 
 # Gecko Spa component - direct connection to the spa I2C bus.
-# GPIO3/GPIO4 are the pins labelled SDA/SCL on the Feather ESP32-S2.
+# XIAO D0/D2. See Hardware Build for why these and not D4/D5.
 gecko_spa:
   id: spa
-  sda: GPIO3
+  sda: GPIO2
   scl: GPIO4
 
 # Climate control
@@ -211,73 +211,91 @@ After installation, you'll have these entities:
 
 ## Hardware Build
 
+The reference build is a **Seeed Studio XIAO ESP32-C3**. Other ESP32 boards work too - see [Other boards](#other-boards).
+
 ### Components Required
 
 | Component | Description | Notes |
 |-----------|-------------|-------|
-| ESP32 board | WiFi/Ethernet microcontroller | Tested with Adafruit Feather ESP32-S2 and Olimex ESP32-POE-ISO |
+| Seeed Studio XIAO ESP32-C3 | WiFi microcontroller | Reference board. Any ESP32 with `framework: arduino` works |
 | Bidirectional logic level converter | 3.3V <-> 5V, 2 channels minimum | **Must be the MOSFET (BSS138) type.** See the warning below |
+| 2 x 220Ω resistors | Series protection for the I2C pins | Recommended - see [Protecting the ESP32 pins](#protecting-the-esp32-pins) |
 | Dupont wires | Various | Connections between board, converter and spa |
 
 > **The converter type matters.** I2C is an open-drain bus: both ends pull the line low and pull-up resistors bring it back high. Only the passive MOSFET converters (BSS138, or a TXS010x) can pass that. A push-pull converter such as the **TXB0104 will not work** on I2C, and neither will a resistor voltage divider - that is fine for one-way UART, but it cannot pass a line the far end is holding down.
 
 ### Pin Connections
 
-#### ESP32 to Level Converter (low-voltage side)
+#### XIAO ESP32-C3 to Level Converter (low-voltage side)
 
-| ESP32 Pin | Converter Pin | Notes |
-|-----------|---------------|-------|
-| SDA GPIO (GPIO3 on the Feather S2) | LV1 | I2C data, 3.3V side |
-| SCL GPIO (GPIO4 on the Feather S2) | LV2 | I2C clock, 3.3V side |
-| 3V3 | LV | Reference voltage for the low side |
-| GND | GND | Common ground |
+| XIAO Pin | GPIO | Converter Pin | Notes |
+|----------|------|---------------|-------|
+| D0 | GPIO2 | LV1 | I2C data (SDA), via 220Ω |
+| D2 | GPIO4 | LV2 | I2C clock (SCL), via 220Ω |
+| 3V3 | - | LV | Reference for the low side. **Must be 3.3V, never 5V** |
+| GND | - | GND | Common ground |
 
 #### Level Converter to Spa (high-voltage side)
 
-| Converter Pin | Spa Connector | Notes |
-|---------------|---------------|-------|
-| HV1 | SDA | I2C data, 5V side |
-| HV2 | SCL | I2C clock, 5V side |
-| HV | 5V | Reference voltage for the high side |
-| GND | GND | Common ground required |
+Pin numbers are on the spa's CO port, as shown in the pinout picture below.
 
-**Pull-ups:** the spa bus already carries roughly 4.7k pull-ups to 5V, and BSS138 breakout boards carry 10k pull-ups on both sides. Do not add more.
+| Converter Pin | Spa CO Port | Notes |
+|---------------|-------------|-------|
+| HV1 | SDA (pin 3) | I2C data, 5V side |
+| HV2 | SCL (pin 2) | I2C clock, 5V side |
+| HV | 5V (pin 4) | Reference for the high side |
+| GND | GND (pin 8) | Common ground required |
 
-**Power:** the spa's 5V rail can supply the converter's HV reference, but do not run the whole ESP32 off it - use USB, an external supply, or PoE.
+**Why D0/D2 and not D4/D5?** D4/D5 (GPIO6/GPIO7) are the XIAO's labelled SDA/SCL, and on a healthy board they are the better choice because they are not strapping pins. The reference build moved to D0/D2 after GPIO6/GPIO7 were damaged by 5V from the old Arduino proxy wiring. GPIO2 is a C3 strapping pin, so ESPHome prints a warning about it; the I2C pull-ups hold it high at reset, which is the state it needs.
 
-> **Adafruit Feather ESP32-S2 only:** the board gates power to its on-board I2C pull-ups behind GPIO7. The example config drives that high on boot with an internal `gpio` switch. It is harmless when the converter supplies its own pull-ups, and required if it does not.
+**Pull-ups:** the spa bus already carries its own pull-ups to 5V, and BSS138 breakout boards carry 10k pull-ups on both sides. Do not add more.
+
+**Power:** the spa's 5V rail can supply the converter's HV reference, but do not run the ESP32 off it - the spa rates that line at 125mA, and WiFi bursts go above that. Use USB or a separate supply.
+
+### Protecting the ESP32 pins
+
+A correctly wired BSS138 never lets the ESP32 side rise above its 3.3V reference, so the pins are safe by design. These guard against the ways that can go wrong:
+
+- **220Ω in series with each I2C line, at the ESP32 end.** If 5V ever reaches the line, this limits the current into the pin's clamp diodes to a few mA, which the pin survives. It makes no practical difference to I2C at 100kHz. Stay at 220Ω or below: when the ESP32 pulls the line low, the spa-side pull-up current flows through this resistor too, and a larger value lifts the "low" voltage.
+- **Meter the converter before connecting the ESP32.** LV must read 3.3V and HV 5V. LV accidentally on 5V is the one miswiring that puts 5V straight onto the ESP32 pins through the converter's pull-ups.
+- **Optional: a TVS/ESD array (~5-6V, e.g. SRV05-4) on the spa side**, where the cable lands. Pumps and heaters make a spa an electrically noisy place, and Gecko's own in.touch-2 uses a TVS plus series resistors (see the note in the pinout picture).
+- **Optional: full galvanic isolation.** An **ISO1540** or **ADuM1250** can replace the BSS138: it level-shifts and isolates, so the spa and ESP32 grounds are no longer joined. Use those parts, **not the ISO1541/ADuM1251**, which pass SCL in one direction only - the spa drives the clock too, so they would break this multi-master bus. Their ESP32-side low level also sits a little above 0V by design, so bench-test before sealing the enclosure.
 
 ### Wiring Diagram
 Credits to agittins for the pictures
 
 <img src="./pictures/spa_pinouts.png" width="500"><img src="./pictures/spa_power.png" width="400">
-<img src="./pictures/adafruit_esp32s2.png" width="550">
 
 ```
-                    ┌─────────────────┐
-                    │   Gecko Spa     │
-                    │   Motherboard   │
-                    │                 │
-                    │ SDA  SCL  5V GND│
-                    └──┬────┬────┬──┬─┘
-                       │    │    │  │
-    ┌──────────────────┼────┼────┼──┼───────────────────────┐
-    │                  │    │    │  │                       │
-    │  ┌───────────────┴────┴────┴──┴────────────────────┐  │
-    │  │  HV1  HV2   HV  GND                             │  │
-    │  │              Logic Level Converter              │  │
-    │  │                (BSS138, bidirectional)          │  │
-    │  │  LV1  LV2   LV  GND                             │  │
-    │  └───┬────┬─────┬───┬────────────────────────────-─┘  │
-    │      │    │     │   │                                 │
-    │  ┌───┴────┴─────┴───┴─────────────────────────────┐   │
-    │  │ GPIO3 GPIO4  3V3 GND                           │   │
-    │  │ (SDA) (SCL)                                    │   │
-    │  │               Adafruit ESP32-S2                │   │
-    │  └────────────────────────────────────────────────┘   │
-    │                                                       │
-    └───────────────────────────────────────────────────────┘
+              ┌────────────────────────────────┐
+              │   Gecko Spa CO port (pin no.)  │
+              │                                │
+              │    SDA     SCL     5V     GND  │
+              │    (3)     (2)     (4)    (8)  │
+              └─────┬───────┬───────┬──────┬───┘
+                    │       │       │      │
+              ┌─────┴───────┴───────┴──────┴───┐
+              │    HV1     HV2     HV     GND  │
+              │      Logic Level Converter     │
+              │     (BSS138, bidirectional)    │
+              │    LV1     LV2     LV     GND  │
+              └─────┬───────┬───────┬──────┬───┘
+                    │       │       │      │
+                 [220Ω]  [220Ω]     │      │
+                    │       │       │      │
+              ┌─────┴───────┴───────┴──────┴───┐
+              │    D0      D2     3V3     GND  │
+              │  (GPIO2) (GPIO4)               │
+              │      Seeed XIAO ESP32-C3       │
+              └────────────────────────────────┘
 ```
+
+### Other boards
+
+Direct I2C works on any ESP32 built with `framework: arduino`. These example configs compile but have not been run against a spa:
+
+- [`esphome/spa-controller-feather-s2.yaml`](esphome/spa-controller-feather-s2.yaml) - Adafruit Feather ESP32-S2 on GPIO3/GPIO4 (the pins labelled SDA/SCL). That board gates power to its on-board I2C pull-ups behind GPIO7, which the config drives high on boot.
+- [`esphome/spa-controller-olimex.yaml`](esphome/spa-controller-olimex.yaml) - Olimex ESP32-POE-ISO on GPIO13/GPIO14. See [the Olimex guide](docs/olimex-poe-setup.md).
 
 ---
 
@@ -289,7 +307,7 @@ Credits to agittins for the pictures
 |--------|---------|-------------|
 | `sda` | *(required for direct I2C)* | GPIO carrying I2C data to the level converter |
 | `scl` | *(required for direct I2C)* | GPIO carrying I2C clock to the level converter |
-| `i2c_bus` | `0` | Which of the ESP32's two I2C peripherals to use. Change it only if something else in your config already claims bus 0 |
+| `i2c_bus` | `0` | Which I2C peripheral to use. Change it only if something else in your config already claims bus 0. The ESP32-C3 has only one, so it must be `0` there |
 | `address` | `0x17` | Bus address. Both the spa and the controller answer to this |
 | `frequency` | `100kHz` | Bus speed. The spa runs standard mode; leave it alone unless you know otherwise |
 | `notif_date_format` | `D-M-Y` | Swap to `Y-M-D` if the maintenance reminder dates look wrong |
@@ -625,9 +643,11 @@ The Arduino Wire library has a default 32-byte I2C buffer, but the spa sends mes
 | ESP32-S2 Pin | Arduino Nano Clone Pin | Notes |
 |--------------|------------------|-------|
 | GPIO5 (TX) | RX (D0) | Direct connection (3.3V -> 5V tolerant) |
-| GPIO16 (RX) | TX (D1) | Via voltage divider (5V -> 3.3V) |
-| GPIO17 | RST | Arduino reset (directly, no resistor needed) |
+| GPIO16 (RX) | TX (D1) | Via voltage divider (5V -> 3.3V) - **mandatory** |
+| GPIO17 | RST | Via an NPN transistor or spare level-converter channel - **never directly** |
 | GND | GND | Common ground required |
+
+> **Do not wire an ESP32 pin straight to the Arduino's RST or TX.** The Nano pulls RST up to 5V, and its TX drives 5V. Either one puts 5V on a 3.3V ESP32 pin; over time that kills the pin, typically with intermittent link failures first. This is exactly how the reference build lost its original RST and RX pins. For RST, use an NPN transistor (ESP32 pin -> 1kΩ -> base, emitter to GND, collector to RST) and set `inverted: true` on `reset_pin`, or route it through a spare channel of a BSS138 level converter.
 
 ```
 Arduino TX (D1) ----[2.7kΩ]----+---- ESP32 GPIO16 (RX)
@@ -734,6 +754,7 @@ Set `logger: level: DEBUG` and watch the boot log. `dump_config()` prints the tr
 - Confirm HV is tied to the spa's 5V and LV to the ESP32's 3V3. Without both references a BSS138 board passes nothing.
 - Check the ground is common between the ESP32 and the spa.
 - On the Adafruit Feather ESP32-S2, make sure GPIO7 (I2C power) is being driven high - the example config does this.
+- Check the ESP32 pins themselves are alive. Temporarily flash a config with a `gpio` switch on each I2C pin, disconnect the wires from the converter, and meter them: a healthy pin reads 0V when its switch is off. One that reads 3.3V while being driven low is damaged - move to another GPIO.
 
 ### `I2C slave mode not up yet` or `bad pin state` in the log
 
