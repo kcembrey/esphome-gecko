@@ -1,6 +1,7 @@
 #include "gecko_spa.h"
 #include "esphome/core/log.h"
 #include <algorithm>
+#include <cmath>
 #include <ctime>
 
 namespace esphome {
@@ -157,16 +158,20 @@ void GeckoSpa::send_program_command(uint8_t prog) {
 }
 
 void GeckoSpa::send_temperature_command(float temp_c) {
-  if (temp_c < 26.0 || temp_c > 40.0)
+  if (temp_c < MIN_TEMPERATURE || temp_c > max_temperature_) {
+    ESP_LOGW(TAG, "Ignoring setpoint %.1f C, outside %.1f-%.1f C", temp_c, MIN_TEMPERATURE, max_temperature_);
     return;
-  uint8_t temp_raw = (uint8_t)((temp_c * 18.0) - 512.0);
+  }
+  // Writes SetpointG (config offset 0x0001): a big-endian word in 1/18 C.
+  // The high byte is not always 0x02 - anything under 28.5 C is 0x01xx.
+  uint16_t raw = (uint16_t) lroundf(temp_c * 18.0f);
   uint8_t cmd[21] = {
       0x17, 0x0A, 0x00, 0x00, 0x00, 0x17, 0x09, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x07, 0x46, config_version_, status_version_,
-      0x00, 0x01, 0x02, temp_raw, 0x00};
+      0x00, 0x01, (uint8_t) (raw >> 8), (uint8_t) (raw & 0xFF), 0x00};
   cmd[20] = calc_checksum(cmd, 21);
   send_i2c_message(cmd, 21);
-  ESP_LOGI(TAG, "Sent temperature %.1f command (raw=%02X)", temp_c, temp_raw);
+  ESP_LOGI(TAG, "Sent temperature %.1f command (raw=%04X)", temp_c, raw);
 }
 
 void GeckoSpa::request_status() {
@@ -807,8 +812,8 @@ void GeckoSpaClimate::setup() {
 climate::ClimateTraits GeckoSpaClimate::traits() {
   auto traits = climate::ClimateTraits();
   traits.set_supported_modes({climate::CLIMATE_MODE_HEAT, climate::CLIMATE_MODE_COOL});
-  traits.set_visual_min_temperature(26.0);
-  traits.set_visual_max_temperature(40.0);
+  traits.set_visual_min_temperature(GeckoSpa::MIN_TEMPERATURE);
+  traits.set_visual_max_temperature(parent_->get_max_temperature());
   traits.set_visual_temperature_step(0.5);
   return traits;
 }

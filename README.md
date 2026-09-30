@@ -311,6 +311,7 @@ Direct I2C works on any ESP32, with either framework. These example configs comp
 | `address` | `0x17` | Bus address. Both the spa and the controller answer to this |
 | `frequency` | `100kHz` | Bus speed. The spa runs standard mode; leave it alone unless you know otherwise |
 | `notif_date_format` | `D-M-Y` | Swap to `Y-M-D` if the maintenance reminder dates look wrong |
+| `max_temperature` | `40°C` | Highest setpoint Home Assistant will offer and send, up to `41°C`. Gecko panels only reach 41 °C by holding the up key |
 | `uart_id` | - | Legacy Arduino proxy mode. Mutually exclusive with `sda`/`scl` |
 | `reset_pin` | - | Legacy Arduino proxy mode only - the GPIO wired to the Arduino's RST pin |
 
@@ -572,22 +573,39 @@ Changes the spa program.
 
 #### Temperature Set Command (21 bytes)
 
-Sets the target temperature for the spa.
+Sets the target temperature for the spa. It appears to be one use of the pack's general "write memory" command (`0x46`): after the config and status versions come a 2-byte address and then the value, with the length byte at offset 12 saying how long the value is. The light, pump and circulation commands have the same shape with a 1-byte value. Here the address is `0x0001`, which is `SetpointG` in the config structure.
 
 ```
-17 0A 00 00 00 17 09 00 00 00 00 00 07 46 52 51 00 01 02 [TEMP] [CHK]
-                                                         ^^^^   ^^^
-                                                         Raw temp value
+17 0A 00 00 00 17 09 00 00 00 00 00 07 46 [CFG] [STS] 00 01 [HI] [LO] [CHK]
+                                          ^^^^^^^^^^^ ^^^^^ ^^^^^^^^^
+                                          config and  addr  setpoint
+                                          status vers 0x0001  word
 ```
 
-**Temperature Encoding:**
+**Temperature Encoding:** a big-endian 16-bit word in 1/18 °C.
 
 ```
-TEMP_RAW = (temperature_celsius × 18) - 512
+RAW = round(temperature_celsius × 18)
 ```
 
-| Temperature | Calculation | Raw Value |
-|-------------|-------------|-----------|
+| Temperature | RAW | Bytes |
+|-------------|-----|-------|
+| 26.0°C | 468 | `01 D4` |
+| 36.5°C | 657 | `02 91` |
+| 37.0°C | 666 | `02 9A` |
+| 40.0°C | 720 | `02 D0` |
+| 41.0°C | 738 | `02 E2` |
+
+> Earlier versions assumed the high byte was always `02` and computed only the low byte as `RAW - 512`. That covers 28.5–42.5 °C; any setpoint below 28.5 °C reached the spa as the wrong value.
+
+41 °C is above the usual Gecko limit of 40 °C - panels only reach it by holding the up key - so set `max_temperature: 41` to allow it from Home Assistant.
+
+**Example - Set 37°C** (config/status versions 65/66, so `41 42`):
+```
+17 0A 00 00 00 17 09 00 00 00 00 00 07 46 41 42 00 01 02 9A [CHK]
+```
+
+-------------|-------------|-----------|
 | 26.0°C | (26 × 18) - 512 = -44 | 0xD4 |
 | 36.5°C | (36.5 × 18) - 512 = 145 | 0x91 |
 | 37.0°C | (37 × 18) - 512 = 154 | 0x9A |

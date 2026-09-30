@@ -112,6 +112,11 @@ class GeckoSpa : public Component {
   void set_pack_type_sensor(text_sensor::TextSensor *s) { pack_type_sensor_ = s; }
   void set_pump_timer_sensor(sensor::Sensor *s) { pump_timer_sensor_ = s; }
   void set_notif_date_format(NotifDateFormat format) { notif_date_format_ = format; }
+  // Highest setpoint accepted from Home Assistant. Gecko panels stop at 40 C
+  // unless the up key is held, which unlocks 41 C.
+  void set_max_temperature(float temp_c) { max_temperature_ = temp_c; }
+  float get_max_temperature() const { return max_temperature_; }
+  static constexpr float MIN_TEMPERATURE = 26.0f;
 
   // Command methods
   void send_light_command(bool on);
@@ -168,6 +173,7 @@ class GeckoSpa : public Component {
   sensor::Sensor *pump_timer_sensor_{nullptr};
   GeckoTransport *transport_{nullptr};
   NotifDateFormat notif_date_format_{NotifDateFormat::D_M_Y};
+  float max_temperature_{40.0f};
 
   // State
   bool light_state_{false};

@@ -6,6 +6,7 @@ from esphome.const import (
     CONF_ADDRESS,
     CONF_FREQUENCY,
     CONF_ID,
+    CONF_MAX_TEMPERATURE,
     CONF_SCL,
     CONF_SDA,
 )
@@ -125,6 +126,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_NOTIF_DATE_FORMAT, default="D-M-Y"): cv.enum(
                 NOTIF_DATE_FORMATS, upper=True
             ),
+            # Gecko packs cap the setpoint at 40 C; 41 C is only reachable on
+            # the panel by holding the up key, so it is opt-in here too.
+            cv.Optional(CONF_MAX_TEMPERATURE, default="40°C"): cv.All(
+                cv.temperature, cv.Range(min=30.0, max=41.0)
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_transport,
@@ -170,3 +176,4 @@ async def to_code(config):
 
     cg.add(var.set_transport(transport))
     cg.add(var.set_notif_date_format(config[CONF_NOTIF_DATE_FORMAT]))
+    cg.add(var.set_max_temperature(config[CONF_MAX_TEMPERATURE]))
