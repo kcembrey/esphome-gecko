@@ -783,6 +783,10 @@ Set `logger: level: DEBUG` and watch the boot log. `dump_config()` prints the tr
 - On the Adafruit Feather ESP32-S2, make sure GPIO7 (I2C power) is being driven high - the example config does this.
 - Check the ESP32 pins themselves are alive. Temporarily flash a config with a `gpio` switch on each I2C pin, disconnect the wires from the converter, and meter them: a healthy pin reads 0V when its switch is off. One that reads 3.3V while being driven low is damaged - move to another GPIO.
 
+### Reminder sensors stay "Unknown"
+
+The filter, water-change and checkup reminders come from a 77-byte notification message that not every pack sends. An inYT C65/S66 never sends it, and neither its config nor its status structure holds reminder dates, so the eight reminder entities (the four `*_due` text sensors and the four "Days" template sensors built on them) can only ever read Unknown there. Remove them from your config if your pack is one of these.
+
 ### `I2C slave mode not up yet` or `bad pin state` in the log
 
 On `framework: arduino`, the Arduino HAL refuses to start slave mode while SDA or SCL is held low. The component keeps retrying with a backoff, and the HAL runs the standard nine-clock bus recovery on each attempt. On `framework: esp-idf` the driver starts regardless, so a stuck line shows up as `Spa Connected` staying off instead; the **Reconnect Spa Bus** button (or the automatic retry after a minute of silence) runs the same nine-clock recovery. If it never clears:

@@ -33,6 +33,7 @@ void GeckoSpa::dump_config() {
     transport_->dump_transport_config();
   ESP_LOGCONFIG(TAG, "  Notification date format: %s",
                 notif_date_format_ == NotifDateFormat::Y_M_D ? "Y-M-D" : "D-M-Y");
+  ESP_LOGCONFIG(TAG, "  Max temperature: %.1f C", max_temperature_);
 }
 
 void GeckoSpa::loop() {
@@ -304,7 +305,12 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
 
     if (spa_time_sensor_) {
       char time_str[20];
-      snprintf(time_str, sizeof(time_str), "%02d/%02d %02d:%02d:%02d", day, month, hour, minute, second);
+      // Some packs (an inYT C65/S66) keep no date and send 0xFF for it
+      if (day == 0xFF || month == 0xFF) {
+        snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d", hour, minute, second);
+      } else {
+        snprintf(time_str, sizeof(time_str), "%02d/%02d %02d:%02d:%02d", day, month, hour, minute, second);
+      }
       spa_time_sensor_->publish_state(time_str);
     }
 
@@ -373,6 +379,8 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
     int payload_start = HEADER_LEN;
     int payload_len = len - payload_start;
     if (msg_buffer_len_ + payload_len <= sizeof(msg_buffer_)) {
+      if (part_count_ < MAX_PARTS)
+        part_starts_[part_count_++] = msg_buffer_len_;
       memcpy(msg_buffer_ + msg_buffer_len_, data + payload_start, payload_len);
       msg_buffer_len_ += payload_len;
     }
@@ -465,14 +473,32 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
                customer_id, num_zones,
                silent_mode < 5 ? silent_str[silent_mode] : "?");
 
-      // Reuse the status parser on the status portion, if we know what the length of the
-      // status message should be.
-      if (status_msg_len_ != 0) {
+      // The spa appends a full status block to this message, so the keep-alive
+      // refreshes status even when nothing has been commanded. If we have not
+      // seen a standalone status yet, learn its length here: it is the tail
+      // that starts at a part boundary and looks like a status message.
+      if (status_msg_len_ == 0) {
+        for (int i = part_count_ - 1; i >= 0; i--) {
+          uint16_t tail = msg_buffer_len_ - part_starts_[i];
+          if (tail > 170)
+            break;
+          if (tail >= MIN_STATUS_MSG_LEN && msg_buffer_[part_starts_[i] + 1] == 0x00) {
+            ESP_LOGI(TAG, "Auto-detect %d as the standard status message length (from config message)", tail);
+            status_msg_len_ = tail;
+            break;
+          }
+        }
+      }
+
+      if (status_msg_len_ != 0 && msg_buffer_len_ > status_msg_len_) {
         // Status portion is the very end of the message
         int STATUS_OFFSET = msg_buffer_len_ - status_msg_len_;
-        // Check for some expected byte markers
-        if ((msg_buffer_[STATUS_OFFSET - 1] == 0x3B) &&
-            (msg_buffer_[STATUS_OFFSET + 1] == 0)) {
+        // It starts a part of its own. An inYT C82/S81 pack also always leaves
+        // 0x3B just before it - really the previous part's checksum, which
+        // varies on other packs (0xD4/0xD5 on an inYT C65/S66) - so accept
+        // either sign.
+        bool starts_part = this->is_part_start_(STATUS_OFFSET);
+        if ((starts_part || msg_buffer_[STATUS_OFFSET - 1] == 0x3B) && msg_buffer_[STATUS_OFFSET + 1] == 0) {
           parse_status_message(&msg_buffer_[STATUS_OFFSET]);
         }
       }
@@ -482,6 +508,7 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
     msg_buffer_len_ = 0;
     last_part_len_ = 0;
     repeats_dropped_ = 0;
+    part_count_ = 0;
     return;
   }
 
@@ -687,9 +714,13 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
   }
 
   // Only update temperature if valid data was received
-  if (temp_valid && (first || abs(new_target - target_temp_) > 0.1 || abs(new_actual - actual_temp_) > 0.1)) {
+  // std::fabs: a bare abs() can resolve to the int overload and truncate, so
+  // changes under a whole degree would never be published.
+  if (temp_valid &&
+      (first || std::fabs(new_target - target_temp_) > 0.1f || std::fabs(new_actual - actual_temp_) > 0.1f)) {
     target_temp_ = new_target;
     actual_temp_ = new_actual;
+    temps_known_ = true;
     ESP_LOGI(TAG, "Temp: target=%.1f actual=%.1f", target_temp_, actual_temp_);
     update_climate_state();
   }
@@ -718,31 +749,28 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
 }
 
 void GeckoSpa::update_climate_state() {
-  if (!climate_)
+  // Until a status message has given us real temperatures there is nothing
+  // true to publish (the members still hold 0 C).
+  if (!climate_ || !temps_known_)
     return;
 
   climate_->target_temperature = target_temp_;
   climate_->current_temperature = actual_temp_;
 
-  // Set mode based on target vs actual temperature
-  if (target_temp_ < actual_temp_) {
-    climate_->mode = climate::CLIMATE_MODE_COOL;
-  } else {
-    climate_->mode = climate::CLIMATE_MODE_HEAT;
-  }
-
-  // Set action based on heating flag and temperature comparison
-  // heating_state_ is the authoritative source for whether heater is running
-  if (heating_state_) {
-    climate_->action = climate::CLIMATE_ACTION_HEATING;
-  } else if (target_temp_ < actual_temp_) {
-    // Spa is cooling down (no active cooling, just natural heat loss)
-    climate_->action = climate::CLIMATE_ACTION_COOLING;
-  } else {
-    climate_->action = climate::CLIMATE_ACTION_IDLE;
-  }
+  // A spa only heats: HEAT is its one mode, and the action says whether the
+  // heater is running right now.
+  climate_->mode = climate::CLIMATE_MODE_HEAT;
+  climate_->action = heating_state_ ? climate::CLIMATE_ACTION_HEATING : climate::CLIMATE_ACTION_IDLE;
 
   climate_->publish_state();
+}
+
+bool GeckoSpa::is_part_start_(uint16_t offset) const {
+  for (uint8_t i = 0; i < part_count_; i++) {
+    if (part_starts_[i] == offset)
+      return true;
+  }
+  return false;
 }
 
 int GeckoSpa::days_since_2000(int day, int month, int year) {
@@ -838,7 +866,10 @@ void GeckoSpaClimate::setup() {
 
 climate::ClimateTraits GeckoSpaClimate::traits() {
   auto traits = climate::ClimateTraits();
-  traits.set_supported_modes({climate::CLIMATE_MODE_HEAT, climate::CLIMATE_MODE_COOL});
+  traits.set_supported_modes({climate::CLIMATE_MODE_HEAT});
+  // Without these ESPHome does not report the water temperature or whether
+  // the heater is running, and Home Assistant shows neither.
+  traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE | climate::CLIMATE_SUPPORTS_ACTION);
   traits.set_visual_min_temperature(GeckoSpa::MIN_TEMPERATURE);
   traits.set_visual_max_temperature(parent_->get_max_temperature());
   traits.set_visual_temperature_step(0.5);

@@ -184,6 +184,7 @@ class GeckoSpa : public Component {
   bool standby_state_{false};
   bool connected_{false};
   bool first_status_received_{false};
+  bool temps_known_{false};  // Set once a status message has given us real temperatures
   uint8_t user_demand_state_{0};  // Bitfield from udP1-udP4 (P1-P4 user demand)
   uint8_t pump1_state_{0};   // 0=OFF, 1=HIGH, 2=LOW
   uint8_t pump2_state_{0};   // Read-only
@@ -214,6 +215,12 @@ class GeckoSpa : public Component {
   uint8_t last_part_[GECKO_MAX_FRAME_LEN];
   uint8_t last_part_len_{0};
   uint8_t repeats_dropped_{0};
+  // Where each part of the message being reassembled starts in msg_buffer_.
+  // A status block embedded in a config message starts a part of its own.
+  static const uint8_t MAX_PARTS = 16;
+  uint16_t part_starts_[MAX_PARTS];
+  uint8_t part_count_{0};
+  bool is_part_start_(uint16_t offset) const;
 
   // GO keep-alive message
   static const uint8_t GO_MESSAGE[15];
