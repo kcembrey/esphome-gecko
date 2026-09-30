@@ -32,7 +32,7 @@
 // Version 1 of the slave driver cannot report where one transaction ends and
 // the next begins, which is how this protocol tells its messages apart.
 #if !CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2
-#error "gecko_spa needs CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2 (the component sets it; check it is not being overridden)"
+#error "gecko_spa needs CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2. The component sets it, so this is usually a stale build: run Clean Build Files and build again"
 #endif
 #include <driver/i2c_master.h>
 #include <driver/i2c_slave.h>

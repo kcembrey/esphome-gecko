@@ -1,6 +1,7 @@
 #include "gecko_spa.h"
 #include "esphome/core/log.h"
 #include <algorithm>
+#include <cinttypes>
 #include <cmath>
 #include <ctime>
 
@@ -54,7 +55,8 @@ void GeckoSpa::loop() {
       // Retry intervals: 30s, 60s, 120s, then every 120s (max 5 retries before giving up)
       uint32_t backoff = 30000UL * (1 << std::min(recovery_retry_count_, (uint8_t) 2));
       if (recovery_retry_count_ < 5 && (millis() - last_recovery_time_ > backoff)) {
-        ESP_LOGW(TAG, "Link recovery retry %d/%d (backoff %ds)", recovery_retry_count_ + 1, 5, backoff / 1000);
+        ESP_LOGW(TAG, "Link recovery retry %d/%d (backoff %" PRIu32 "s)", recovery_retry_count_ + 1, 5,
+                 backoff / 1000);
         this->recover_link();
       }
     }
