@@ -17,6 +17,9 @@ SINGLE_I2C_VARIANTS = {"ESP32C3"}
 # ESP-IDF's version 2 I2C slave driver, the one that reports where each
 # transaction ends, is only available from this release on.
 MIN_IDF_VERSION = cv.Version(5, 4, 0)
+# ESP-IDF 6.0 dropped the version 1 driver and reworked the slave API; the IDF
+# backend has not been ported to it yet.
+UNSUPPORTED_IDF_VERSION = cv.Version(6, 0, 0)
 
 AUTO_LOAD = ["climate", "switch", "select", "binary_sensor", "text_sensor"]
 
@@ -83,6 +86,12 @@ def _validate_transport(config):
                 f"(this build uses {idf_version()}). Update ESPHome, or use "
                 "'framework: type: arduino'"
             )
+        if idf_version() >= UNSUPPORTED_IDF_VERSION:
+            raise cv.Invalid(
+                f"Direct I2C mode does not support ESP-IDF {UNSUPPORTED_IDF_VERSION.major}.x "
+                f"yet (this build uses {idf_version()}). Use ESPHome's default ESP-IDF "
+                "5.5 by removing the framework 'version:', or 'framework: type: arduino'"
+            )
     if config[CONF_SDA] == config[CONF_SCL]:
         raise cv.Invalid(f"'{CONF_SDA}' and '{CONF_SCL}' must be different pins")
 
@@ -139,9 +148,16 @@ async def to_code(config):
         if CORE.using_arduino:
             cg.add_define("USE_GECKO_SPA_I2C_ARDUINO_HAL")
         else:
-            from esphome.components.esp32 import add_idf_sdkconfig_option
+            from esphome.components.esp32 import (
+                add_idf_sdkconfig_option,
+                include_builtin_idf_component,
+            )
 
             cg.add_define("USE_GECKO_SPA_I2C_IDF")
+            # ESPHome leaves the IDF I2C driver out of the build unless a
+            # component asks for it. Without it there are no driver headers,
+            # and the option below is silently dropped along with its Kconfig.
+            include_builtin_idf_component("esp_driver_i2c")
             # Version 1 of the IDF slave driver cannot tell where one
             # transaction ends and the next begins; version 2 can.
             add_idf_sdkconfig_option("CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2", True)

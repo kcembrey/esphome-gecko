@@ -26,6 +26,8 @@
 #include <sdkconfig.h>
 #if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 4, 0)
 #error "gecko_spa direct I2C on ESP-IDF needs ESP-IDF 5.4 or newer"
+#elif ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+#error "gecko_spa direct I2C does not support ESP-IDF 6 yet; use ESP-IDF 5.5 or framework arduino"
 #endif
 // Version 1 of the slave driver cannot report where one transaction ends and
 // the next begins, which is how this protocol tells its messages apart.
