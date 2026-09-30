@@ -11,8 +11,11 @@
 
 #ifdef GECKO_SPA_DIRECT_I2C
 #include <driver/gpio.h>
+#include <esp_attr.h>
+#ifdef USE_GECKO_SPA_I2C_ARDUINO_HAL
 #include <esp32-hal-i2c.h>
 #include <esp32-hal-i2c-slave.h>
+#endif
 #endif
 
 namespace esphome {
@@ -147,61 +150,46 @@ void GeckoUartTransport::dump_transport_config() {
 // that something ACKs.
 static const uint8_t SLAVE_READ_RESPONSE[2] = {0x00, 0x00};
 
+// ---------------------------------------------------------------------------
+// Shared by both backends
+// ---------------------------------------------------------------------------
+
 void GeckoI2cTransport::setup_transport() {
   rx_queue_ = xQueueCreate(RX_QUEUE_DEPTH, sizeof(RxFrame));
   if (rx_queue_ == nullptr) {
     ESP_LOGE(TAG, "Could not allocate I2C receive queue");
     return;
   }
+#ifdef USE_GECKO_SPA_I2C_IDF
+  slave_lock_ = xSemaphoreCreateMutex();
+  if (slave_lock_ == nullptr ||
+      xTaskCreate(request_task_, "gecko_i2c_req", 2048, this, REQUEST_TASK_PRIORITY, &request_task_handle_) != pdPASS) {
+    ESP_LOGE(TAG, "Could not start the I2C request task");
+    return;
+  }
+#endif
   if (!this->enter_slave_mode_()) {
     ESP_LOGW(TAG, "I2C slave mode not up yet, retrying in the background");
   }
 }
 
-void GeckoI2cTransport::receive_callback_(uint8_t bus_num, uint8_t *data, size_t len, bool stop, void *arg) {
-  auto *self = (GeckoI2cTransport *) arg;
-  if (self->rx_queue_ == nullptr || data == nullptr || len == 0)
-    return;
-
-  RxFrame frame;
-  frame.len = (len > GECKO_MAX_FRAME_LEN) ? GECKO_MAX_FRAME_LEN : (uint8_t) len;
-  memcpy(frame.data, data, frame.len);
-
-  if (xQueueSend(self->rx_queue_, &frame, 0) != pdTRUE)
-    self->rx_dropped_++;
-}
-
-void GeckoI2cTransport::request_callback_(uint8_t bus_num, void *arg) {
-  auto *self = (GeckoI2cTransport *) arg;
-  i2cSlaveWrite(self->bus_num_, SLAVE_READ_RESPONSE, sizeof(SLAVE_READ_RESPONSE), 10);
-}
-
-bool GeckoI2cTransport::enter_slave_mode_() {
-  i2cSlaveAttachCallbacks(bus_num_, request_callback_, receive_callback_, this);
-  esp_err_t err = i2cSlaveInit(bus_num_, sda_pin_, scl_pin_, address_, frequency_, SLAVE_RX_BUFFER_LEN, TX_FRAME_LEN);
-  slave_active_ = (err == ESP_OK);
-  if (slave_active_) {
+bool GeckoI2cTransport::slave_mode_result_(bool ok) {
+  slave_active_ = ok;
+  if (ok) {
     slave_retry_interval_ = 50;
     ESP_LOGD(TAG, "I2C slave listening on 0x%02X", address_);
   } else {
-    // The HAL refuses to start while the spa is mid-transaction. Back off and
-    // try again rather than giving up on the bus.
+    // Starting slave mode can fail while the spa is mid-transaction. Back off
+    // and try again rather than giving up on the bus.
     slave_retry_interval_ = std::min<uint32_t>(slave_retry_interval_ * 2, 2000);
     last_slave_retry_ = millis();
   }
-  return slave_active_;
-}
-
-void GeckoI2cTransport::leave_slave_mode_() {
-  if (!slave_active_)
-    return;
-  i2cSlaveDeinit(bus_num_);
-  slave_active_ = false;
+  return ok;
 }
 
 bool GeckoI2cTransport::bus_is_idle_() {
-  // Both lines released means no master currently owns the bus. The slave HAL
-  // configures the pins as open-drain input/output, so this reads the wire.
+  // Both lines released means no master currently owns the bus. Both backends
+  // configure the pins as open-drain input/output, so this reads the wire.
   return gpio_get_level((gpio_num_t) sda_pin_) != 0 && gpio_get_level((gpio_num_t) scl_pin_) != 0;
 }
 
@@ -232,31 +220,25 @@ void GeckoI2cTransport::flush_tx_queue_() {
 
   this->leave_slave_mode_();
 
-  esp_err_t err = i2cInit(bus_num_, sda_pin_, scl_pin_, frequency_);
+  esp_err_t err = this->master_begin_();
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "I2C master init failed (%s), dropped %u frame(s)", esp_err_to_name(err), pending);
     tx_errors_ += pending;
   } else {
-    uint8_t response[sizeof(SLAVE_READ_RESPONSE)];
     for (uint8_t i = 0; i < pending; i++) {
-      size_t read_count = 0;
-      // Write then repeated-start read of two bytes: what the spa expects, and
-      // what the Arduino proxy did.
-      err = i2cWriteReadNonStop(bus_num_, address_, tx_queue_[i], tx_lengths_[i], response, sizeof(response),
-                                TX_TIMEOUT_MS, &read_count);
+      err = this->master_transfer_(tx_queue_[i], tx_lengths_[i]);
       if (err != ESP_OK) {
         // The spa is another master on this bus, so losing arbitration now and
         // then is normal. One retry after a short backoff clears it.
         delay(2);
-        err = i2cWriteReadNonStop(bus_num_, address_, tx_queue_[i], tx_lengths_[i], response, sizeof(response),
-                                  TX_TIMEOUT_MS, &read_count);
+        err = this->master_transfer_(tx_queue_[i], tx_lengths_[i]);
       }
       if (err != ESP_OK) {
         ESP_LOGW(TAG, "I2C transmit failed: %s", esp_err_to_name(err));
         tx_errors_++;
       }
     }
-    i2cDeinit(bus_num_);
+    this->master_end_();
   }
 
   bool back_up = this->enter_slave_mode_();
@@ -268,7 +250,7 @@ void GeckoI2cTransport::flush_tx_queue_() {
 }
 
 void GeckoI2cTransport::loop_transport() {
-  // Hand over frames captured by the HAL's I2C slave task
+  // Hand over frames captured by the slave driver
   if (rx_queue_ != nullptr) {
     RxFrame frame;
     while (xQueueReceive(rx_queue_, &frame, 0) == pdTRUE) {
@@ -289,8 +271,7 @@ void GeckoI2cTransport::loop_transport() {
 void GeckoI2cTransport::recover_link() {
   ESP_LOGI(TAG, "Reinitialising I2C bus");
   this->leave_slave_mode_();
-  // enter_slave_mode_() runs the HAL's bus recovery (nine SCL pulses) when it
-  // finds the lines stuck low, which is what a wedged bus needs.
+  this->recover_bus_();
   if (!this->enter_slave_mode_())
     ESP_LOGW(TAG, "I2C bus still busy, retrying in the background");
 }
@@ -304,6 +285,222 @@ void GeckoI2cTransport::dump_transport_config() {
     ESP_LOGCONFIG(TAG, "  Dropped frames: %" PRIu32 " rx, %" PRIu32 " tx", rx_dropped_, tx_errors_);
   }
 }
+
+#ifdef USE_GECKO_SPA_I2C_ARDUINO_HAL
+// ---------------------------------------------------------------------------
+// Arduino core HAL backend
+// ---------------------------------------------------------------------------
+
+void GeckoI2cTransport::receive_callback_(uint8_t bus_num, uint8_t *data, size_t len, bool stop, void *arg) {
+  auto *self = (GeckoI2cTransport *) arg;
+  if (self->rx_queue_ == nullptr || data == nullptr || len == 0)
+    return;
+
+  RxFrame frame;
+  frame.len = (len > GECKO_MAX_FRAME_LEN) ? GECKO_MAX_FRAME_LEN : (uint8_t) len;
+  memcpy(frame.data, data, frame.len);
+
+  if (xQueueSend(self->rx_queue_, &frame, 0) != pdTRUE)
+    self->rx_dropped_++;
+}
+
+void GeckoI2cTransport::request_callback_(uint8_t bus_num, void *arg) {
+  auto *self = (GeckoI2cTransport *) arg;
+  i2cSlaveWrite(self->bus_num_, SLAVE_READ_RESPONSE, sizeof(SLAVE_READ_RESPONSE), 10);
+}
+
+bool GeckoI2cTransport::enter_slave_mode_() {
+  i2cSlaveAttachCallbacks(bus_num_, request_callback_, receive_callback_, this);
+  esp_err_t err = i2cSlaveInit(bus_num_, sda_pin_, scl_pin_, address_, frequency_, SLAVE_RX_BUFFER_LEN, TX_FRAME_LEN);
+  return this->slave_mode_result_(err == ESP_OK);
+}
+
+void GeckoI2cTransport::leave_slave_mode_() {
+  if (!slave_active_)
+    return;
+  i2cSlaveDeinit(bus_num_);
+  slave_active_ = false;
+}
+
+esp_err_t GeckoI2cTransport::master_begin_() { return i2cInit(bus_num_, sda_pin_, scl_pin_, frequency_); }
+
+esp_err_t GeckoI2cTransport::master_transfer_(const uint8_t *data, uint8_t len) {
+  // Write then repeated-start read of two bytes: what the spa expects, and
+  // what the Arduino proxy did.
+  uint8_t response[sizeof(SLAVE_READ_RESPONSE)];
+  size_t read_count = 0;
+  return i2cWriteReadNonStop(bus_num_, address_, data, len, response, sizeof(response), TX_TIMEOUT_MS, &read_count);
+}
+
+void GeckoI2cTransport::master_end_() { i2cDeinit(bus_num_); }
+
+void GeckoI2cTransport::recover_bus_() {
+  // Nothing to do here: i2cSlaveInit() checks the lines itself and clocks out
+  // the standard nine SCL pulses when it finds them stuck low.
+}
+
+#endif  // USE_GECKO_SPA_I2C_ARDUINO_HAL
+
+#ifdef USE_GECKO_SPA_I2C_IDF
+// ---------------------------------------------------------------------------
+// ESP-IDF I2C slave driver (version 2) backend
+// ---------------------------------------------------------------------------
+
+bool IRAM_ATTR GeckoI2cTransport::idf_on_receive_(i2c_slave_dev_handle_t slave,
+                                                  const i2c_slave_rx_done_event_data_t *evt, void *arg) {
+  auto *self = static_cast<GeckoI2cTransport *>(arg);
+  if (self->rx_queue_ == nullptr || evt->buffer == nullptr || evt->length == 0)
+    return false;
+
+  // Fires once per transaction: at STOP, or at the repeated START before the
+  // spa's two-byte read. The driver reuses evt->buffer, so copy it now.
+  RxFrame frame;
+  frame.len = (evt->length > GECKO_MAX_FRAME_LEN) ? GECKO_MAX_FRAME_LEN : (uint8_t) evt->length;
+  memcpy(frame.data, evt->buffer, frame.len);
+
+  BaseType_t woken = pdFALSE;
+  if (xQueueSendFromISR(self->rx_queue_, &frame, &woken) != pdTRUE)
+    self->rx_dropped_++;
+  return woken == pdTRUE;
+}
+
+bool IRAM_ATTR GeckoI2cTransport::idf_on_request_(i2c_slave_dev_handle_t slave,
+                                                  const i2c_slave_request_event_data_t *evt, void *arg) {
+  auto *self = static_cast<GeckoI2cTransport *>(arg);
+  BaseType_t woken = pdFALSE;
+  if (self->request_task_handle_ != nullptr)
+    vTaskNotifyGiveFromISR(self->request_task_handle_, &woken);
+  return woken == pdTRUE;
+}
+
+void GeckoI2cTransport::request_task_(void *arg) {
+  auto *self = static_cast<GeckoI2cTransport *>(arg);
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    xSemaphoreTake(self->slave_lock_, portMAX_DELAY);
+    if (self->slave_handle_ != nullptr) {
+      uint32_t written = 0;
+      i2c_slave_write(self->slave_handle_, SLAVE_READ_RESPONSE, sizeof(SLAVE_READ_RESPONSE), &written, 10);
+    }
+    xSemaphoreGive(self->slave_lock_);
+  }
+}
+
+bool GeckoI2cTransport::enter_slave_mode_() {
+  // Without request_task_ nothing would answer the spa's reads, and on chips
+  // that stretch SCL at a read that would hold the whole bus. Stay off it.
+  if (slave_lock_ == nullptr || request_task_handle_ == nullptr)
+    return this->slave_mode_result_(false);
+
+  i2c_slave_config_t config = {};
+  config.i2c_port = (i2c_port_num_t) bus_num_;
+  config.sda_io_num = (gpio_num_t) sda_pin_;
+  config.scl_io_num = (gpio_num_t) scl_pin_;
+  config.clk_source = I2C_CLK_SRC_DEFAULT;
+  config.send_buf_depth = SLAVE_TX_BUFFER_LEN;
+  config.receive_buf_depth = SLAVE_RX_BUFFER_LEN;
+  config.slave_addr = address_;
+  config.addr_bit_len = I2C_ADDR_BIT_LEN_7;
+  config.flags.enable_internal_pullup = true;
+
+  i2c_slave_dev_handle_t handle = nullptr;
+  esp_err_t err = i2c_new_slave_device(&config, &handle);
+  if (err == ESP_OK) {
+    i2c_slave_event_callbacks_t callbacks = {};
+    callbacks.on_request = idf_on_request_;
+    callbacks.on_receive = idf_on_receive_;
+    err = i2c_slave_register_event_callbacks(handle, &callbacks, this);
+    if (err != ESP_OK)
+      i2c_del_slave_device(handle);
+  }
+  if (err != ESP_OK) {
+    ESP_LOGD(TAG, "I2C slave start failed: %s", esp_err_to_name(err));
+    return this->slave_mode_result_(false);
+  }
+
+  xSemaphoreTake(slave_lock_, portMAX_DELAY);
+  slave_handle_ = handle;
+  // Preload the answer to the spa's first read. Chips without stretch-cause
+  // support (the original ESP32) cannot hold the clock while we respond, so
+  // the bytes must already be waiting. On the others this is harmless, and it
+  // also releases the clock if a read arrived before slave_handle_ was set.
+  uint32_t written = 0;
+  i2c_slave_write(handle, SLAVE_READ_RESPONSE, sizeof(SLAVE_READ_RESPONSE), &written, 10);
+  xSemaphoreGive(slave_lock_);
+
+  return this->slave_mode_result_(true);
+}
+
+void GeckoI2cTransport::leave_slave_mode_() {
+  if (!slave_active_)
+    return;
+  xSemaphoreTake(slave_lock_, portMAX_DELAY);
+  i2c_slave_dev_handle_t handle = slave_handle_;
+  slave_handle_ = nullptr;
+  xSemaphoreGive(slave_lock_);
+  if (handle != nullptr)
+    i2c_del_slave_device(handle);
+  slave_active_ = false;
+}
+
+esp_err_t GeckoI2cTransport::master_begin_() {
+  i2c_master_bus_config_t bus_config = {};
+  bus_config.i2c_port = (i2c_port_num_t) bus_num_;
+  bus_config.sda_io_num = (gpio_num_t) sda_pin_;
+  bus_config.scl_io_num = (gpio_num_t) scl_pin_;
+  bus_config.clk_source = I2C_CLK_SRC_DEFAULT;
+  bus_config.glitch_ignore_cnt = 7;
+  bus_config.flags.enable_internal_pullup = true;
+
+  esp_err_t err = i2c_new_master_bus(&bus_config, &master_bus_);
+  if (err != ESP_OK) {
+    master_bus_ = nullptr;
+    return err;
+  }
+
+  i2c_device_config_t device_config = {};
+  device_config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+  device_config.device_address = address_;
+  device_config.scl_speed_hz = frequency_;
+  err = i2c_master_bus_add_device(master_bus_, &device_config, &master_dev_);
+  if (err != ESP_OK) {
+    master_dev_ = nullptr;
+    this->master_end_();
+  }
+  return err;
+}
+
+esp_err_t GeckoI2cTransport::master_transfer_(const uint8_t *data, uint8_t len) {
+  // Write then repeated-start read of two bytes: what the spa expects, and
+  // what the Arduino proxy did.
+  uint8_t response[sizeof(SLAVE_READ_RESPONSE)];
+  return i2c_master_transmit_receive(master_dev_, data, len, response, sizeof(response), (int) TX_TIMEOUT_MS);
+}
+
+void GeckoI2cTransport::master_end_() {
+  if (master_dev_ != nullptr) {
+    i2c_master_bus_rm_device(master_dev_);
+    master_dev_ = nullptr;
+  }
+  if (master_bus_ != nullptr) {
+    i2c_del_master_bus(master_bus_);
+    master_bus_ = nullptr;
+  }
+}
+
+void GeckoI2cTransport::recover_bus_() {
+  // Unlike the Arduino HAL, the IDF slave driver does not check the lines when
+  // it starts. Borrow a master bus for its reset, which clocks out the
+  // standard nine SCL pulses to free a slave stuck holding SDA low.
+  if (this->master_begin_() != ESP_OK)
+    return;
+  esp_err_t err = i2c_master_bus_reset(master_bus_);
+  if (err != ESP_OK)
+    ESP_LOGW(TAG, "I2C bus reset failed: %s", esp_err_to_name(err));
+  this->master_end_();
+}
+
+#endif  // USE_GECKO_SPA_I2C_IDF
 
 #endif  // GECKO_SPA_DIRECT_I2C
 

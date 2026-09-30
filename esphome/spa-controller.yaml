@@ -26,7 +26,8 @@ esp32:
   # The generic C3 board definition works for the XIAO ESP32-C3.
   board: esp32-c3-devkitm-1
   framework:
-    # Direct I2C needs the Arduino core's I2C slave HAL.
+    # Direct I2C works on arduino or esp-idf (ESP-IDF 5.4+). This build has
+    # been run against a spa on arduino.
     type: arduino
 
 # Enable logging

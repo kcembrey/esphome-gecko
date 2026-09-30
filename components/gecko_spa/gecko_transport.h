@@ -10,12 +10,33 @@
 #include "esphome/components/uart/uart.h"
 #endif
 
-// Talking to the spa bus directly needs the ESP32 I2C peripheral in slave mode,
-// which is only exposed by the Arduino framework's HAL.
-#if defined(USE_GECKO_SPA_I2C) && defined(USE_ESP32) && defined(USE_ARDUINO)
+// Talking to the spa bus directly needs the ESP32 I2C peripheral in slave mode.
+// There are two ways to reach it, and __init__.py picks one per framework:
+//   USE_GECKO_SPA_I2C_ARDUINO_HAL - the Arduino core's I2C slave HAL
+//   USE_GECKO_SPA_I2C_IDF         - ESP-IDF's own I2C slave driver (version 2)
+#if defined(USE_GECKO_SPA_I2C) && defined(USE_ESP32)
 #define GECKO_SPA_DIRECT_I2C
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+
+#if defined(USE_GECKO_SPA_I2C_IDF)
+#include <esp_idf_version.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
+#include <sdkconfig.h>
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 4, 0)
+#error "gecko_spa direct I2C on ESP-IDF needs ESP-IDF 5.4 or newer"
+#endif
+// Version 1 of the slave driver cannot report where one transaction ends and
+// the next begins, which is how this protocol tells its messages apart.
+#if !CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2
+#error "gecko_spa needs CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2 (the component sets it; check it is not being overridden)"
+#endif
+#include <driver/i2c_master.h>
+#include <driver/i2c_slave.h>
+#elif !defined(USE_GECKO_SPA_I2C_ARDUINO_HAL)
+#error "gecko_spa: no direct I2C backend selected"
+#endif
 #endif
 
 namespace esphome {
@@ -111,7 +132,11 @@ class GeckoI2cTransport : public GeckoTransport {
   void send_frame(const uint8_t *data, uint8_t len) override;
   void recover_link() override;
   bool recovery_in_progress() override { return !slave_active_; }
-  const char *transport_name() const override { return "Direct I2C"; }
+#ifdef USE_GECKO_SPA_I2C_IDF
+  const char *transport_name() const override { return "Direct I2C (ESP-IDF driver)"; }
+#else
+  const char *transport_name() const override { return "Direct I2C (Arduino HAL)"; }
+#endif
 
  protected:
   // Frames we send are short - the longest command is 21 bytes - and a
@@ -119,7 +144,7 @@ class GeckoI2cTransport : public GeckoTransport {
   static const uint8_t TX_QUEUE_DEPTH = 6;
   static const uint8_t TX_FRAME_LEN = 32;
   static const uint8_t RX_QUEUE_DEPTH = 6;
-  // Slave RX ring inside the HAL. Two max-length frames of headroom.
+  // Slave RX ring inside the driver. Two max-length frames of headroom.
   static const uint16_t SLAVE_RX_BUFFER_LEN = 256;
   // Never sit on a queued frame longer than this waiting for an idle bus.
   static const uint32_t TX_MAX_DEFER_MS = 500;
@@ -132,14 +157,45 @@ class GeckoI2cTransport : public GeckoTransport {
     uint8_t data[GECKO_MAX_FRAME_LEN];
   };
 
-  // These run on the HAL's I2C slave task, not on the ESPHome loop task.
-  static void receive_callback_(uint8_t bus_num, uint8_t *data, size_t len, bool stop, void *arg);
-  static void request_callback_(uint8_t bus_num, void *arg);
-
-  bool enter_slave_mode_();
-  void leave_slave_mode_();
+  // Shared by both backends
   bool bus_is_idle_();
   void flush_tx_queue_();
+  bool slave_mode_result_(bool ok);
+
+  // Backend-specific. flush_tx_queue_() brackets master_transfer_() calls with
+  // master_begin_()/master_end_(), with the slave already torn down.
+  bool enter_slave_mode_();
+  void leave_slave_mode_();
+  esp_err_t master_begin_();
+  esp_err_t master_transfer_(const uint8_t *data, uint8_t len);
+  void master_end_();
+  void recover_bus_();
+
+#ifdef USE_GECKO_SPA_I2C_IDF
+  // TX ring for the spa's two-byte reads. Only ever holds zeros.
+  static const uint16_t SLAVE_TX_BUFFER_LEN = 64;
+  // Same priority the Arduino core gives its own I2C slave task.
+  static const UBaseType_t REQUEST_TASK_PRIORITY = 20;
+
+  // Both run in ISR context.
+  static bool idf_on_receive_(i2c_slave_dev_handle_t slave, const i2c_slave_rx_done_event_data_t *evt, void *arg);
+  static bool idf_on_request_(i2c_slave_dev_handle_t slave, const i2c_slave_request_event_data_t *evt, void *arg);
+  // Answers the spa's reads. i2c_slave_write() is not ISR-safe, and on chips
+  // that stretch SCL at a read it is also what releases the clock, so it has
+  // to happen promptly on a real task.
+  static void request_task_(void *arg);
+
+  i2c_slave_dev_handle_t slave_handle_{nullptr};
+  i2c_master_bus_handle_t master_bus_{nullptr};
+  i2c_master_dev_handle_t master_dev_{nullptr};
+  // Keeps request_task_ off slave_handle_ while the loop tears it down.
+  SemaphoreHandle_t slave_lock_{nullptr};
+  TaskHandle_t request_task_handle_{nullptr};
+#else
+  // These run on the Arduino HAL's I2C slave task, not on the ESPHome loop task.
+  static void receive_callback_(uint8_t bus_num, uint8_t *data, size_t len, bool stop, void *arg);
+  static void request_callback_(uint8_t bus_num, void *arg);
+#endif
 
   uint8_t sda_pin_{0};
   uint8_t scl_pin_{0};

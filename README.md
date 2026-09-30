@@ -70,7 +70,7 @@ esp32:
   # Seeed Studio XIAO ESP32-C3 - the generic C3 definition works for it
   board: esp32-c3-devkitm-1
   framework:
-    type: arduino  # direct I2C needs the Arduino core's I2C slave HAL
+    type: arduino  # esp-idf works too - see Configuration Reference
 
 # Import Gecko Spa component from GitHub
 external_components:
@@ -217,7 +217,7 @@ The reference build is a **Seeed Studio XIAO ESP32-C3**. Other ESP32 boards work
 
 | Component | Description | Notes |
 |-----------|-------------|-------|
-| Seeed Studio XIAO ESP32-C3 | WiFi microcontroller | Reference board. Any ESP32 with `framework: arduino` works |
+| Seeed Studio XIAO ESP32-C3 | WiFi microcontroller | Reference board. Any ESP32 works, on either framework |
 | Bidirectional logic level converter | 3.3V <-> 5V, 2 channels minimum | **Must be the MOSFET (BSS138) type.** See the warning below |
 | 2 x 220Ω resistors | Series protection for the I2C pins | Recommended - see [Protecting the ESP32 pins](#protecting-the-esp32-pins) |
 | Dupont wires | Various | Connections between board, converter and spa |
@@ -292,7 +292,7 @@ Credits to agittins for the pictures
 
 ### Other boards
 
-Direct I2C works on any ESP32 built with `framework: arduino`. These example configs compile but have not been run against a spa:
+Direct I2C works on any ESP32, with either framework. These example configs compile but have not been run against a spa:
 
 - [`esphome/spa-controller-feather-s2.yaml`](esphome/spa-controller-feather-s2.yaml) - Adafruit Feather ESP32-S2 on GPIO3/GPIO4 (the pins labelled SDA/SCL). That board gates power to its on-board I2C pull-ups behind GPIO7, which the config drives high on boot.
 - [`esphome/spa-controller-olimex.yaml`](esphome/spa-controller-olimex.yaml) - Olimex ESP32-POE-ISO on GPIO13/GPIO14. See [the Olimex guide](docs/olimex-poe-setup.md).
@@ -314,7 +314,16 @@ Direct I2C works on any ESP32 built with `framework: arduino`. These example con
 | `uart_id` | - | Legacy Arduino proxy mode. Mutually exclusive with `sda`/`scl` |
 | `reset_pin` | - | Legacy Arduino proxy mode only - the GPIO wired to the Arduino's RST pin |
 
-Direct I2C mode needs an ESP32 with `framework: type: arduino`, because I2C slave mode is only reachable through the Arduino core's HAL. Config validation will tell you if that is not the case.
+Direct I2C mode works on both ESP32 frameworks, and picks the I2C slave backend to match:
+
+| Framework | Backend | Notes |
+|-----------|---------|-------|
+| `arduino` | The Arduino core's I2C slave HAL | The one the reference build has been run against a spa on |
+| `esp-idf` | ESP-IDF's I2C slave driver, version 2 | Needs ESP-IDF 5.4 or newer. The component enables `CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2` itself: version 1 cannot tell where one transaction ends and the next begins, and this protocol identifies messages by their length |
+
+The `Transport:` line in the boot log says which one is running. On a XIAO ESP32-C3, esp-idf builds about 54 KB smaller in flash and saves about 3 KB of RAM.
+
+**Switching an existing device between frameworks:** both frameworks give the app the same two OTA slots, at the same size and position, so an OTA update can carry the switch. OTA never rewrites the partition table, though, so the device keeps its old table until its next USB flash. That is harmless: the only differences come after the app slots (the Arduino layout has a slightly smaller NVS plus two partitions the esp-idf build ignores).
 
 ### Lambdas
 
@@ -758,7 +767,7 @@ Set `logger: level: DEBUG` and watch the boot log. `dump_config()` prints the tr
 
 ### `I2C slave mode not up yet` or `bad pin state` in the log
 
-The HAL refuses to start slave mode while SDA or SCL is held low. The component keeps retrying with a backoff and runs the standard nine-clock bus recovery each time. If it never clears:
+On `framework: arduino`, the Arduino HAL refuses to start slave mode while SDA or SCL is held low. The component keeps retrying with a backoff, and the HAL runs the standard nine-clock bus recovery on each attempt. On `framework: esp-idf` the driver starts regardless, so a stuck line shows up as `Spa Connected` staying off instead; the **Reconnect Spa Bus** button (or the automatic retry after a minute of silence) runs the same nine-clock recovery. If it never clears:
 
 - Something is holding a line low - check for a shorted or miswired converter channel.
 - Verify the pull-ups exist on both sides (the spa supplies ~4.7k, the converter board usually 10k).

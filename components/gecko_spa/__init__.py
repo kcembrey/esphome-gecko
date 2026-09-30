@@ -14,6 +14,10 @@ from esphome.core import CORE
 # Chips with a single I2C peripheral, where only bus 0 exists.
 SINGLE_I2C_VARIANTS = {"ESP32C3"}
 
+# ESP-IDF's version 2 I2C slave driver, the one that reports where each
+# transaction ends, is only available from this release on.
+MIN_IDF_VERSION = cv.Version(5, 4, 0)
+
 AUTO_LOAD = ["climate", "switch", "select", "binary_sensor", "text_sensor"]
 
 CONF_UART_ID = "uart_id"
@@ -71,10 +75,14 @@ def _validate_transport(config):
     if not CORE.is_esp32:
         raise cv.Invalid("Direct I2C mode requires an ESP32")
     if not CORE.using_arduino:
-        # Slave-mode I2C is only reachable through the Arduino core's HAL.
-        raise cv.Invalid(
-            "Direct I2C mode requires 'framework: type: arduino' on the esp32 platform"
-        )
+        from esphome.components.esp32 import idf_version
+
+        if idf_version() < MIN_IDF_VERSION:
+            raise cv.Invalid(
+                f"Direct I2C mode on ESP-IDF needs ESP-IDF {MIN_IDF_VERSION} or newer "
+                f"(this build uses {idf_version()}). Update ESPHome, or use "
+                "'framework: type: arduino'"
+            )
     if config[CONF_SDA] == config[CONF_SCL]:
         raise cv.Invalid(f"'{CONF_SDA}' and '{CONF_SCL}' must be different pins")
 
@@ -128,6 +136,15 @@ async def to_code(config):
             cg.add(transport.set_reset_pin(pin))
     else:
         cg.add_define("USE_GECKO_SPA_I2C")
+        if CORE.using_arduino:
+            cg.add_define("USE_GECKO_SPA_I2C_ARDUINO_HAL")
+        else:
+            from esphome.components.esp32 import add_idf_sdkconfig_option
+
+            cg.add_define("USE_GECKO_SPA_I2C_IDF")
+            # Version 1 of the IDF slave driver cannot tell where one
+            # transaction ends and the next begins; version 2 can.
+            add_idf_sdkconfig_option("CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2", True)
         transport = cg.new_Pvariable(config[CONF_I2C_TRANSPORT_ID])
         cg.add(transport.set_sda_pin(config[CONF_SDA]))
         cg.add(transport.set_scl_pin(config[CONF_SCL]))

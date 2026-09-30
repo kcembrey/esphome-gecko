@@ -9,7 +9,7 @@ esp32:
   # Seeed Studio XIAO ESP32-C3 - the generic C3 definition works for it
   board: esp32-c3-devkitm-1
   framework:
-    type: arduino  # direct I2C needs the Arduino core's I2C slave HAL
+    type: arduino  # esp-idf works too - see the README's Configuration Reference
 
 # Import Gecko Spa component from GitHub
 external_components:
