@@ -209,6 +209,11 @@ class GeckoSpa : public Component {
   // Multi-part message buffer (byte[10]=0x01 means more coming, 0x00 means last)
   uint8_t msg_buffer_[512];
   uint16_t msg_buffer_len_{0};
+  // The last part appended to msg_buffer_, so a part the spa resends is not
+  // appended twice.
+  uint8_t last_part_[GECKO_MAX_FRAME_LEN];
+  uint8_t last_part_len_{0};
+  uint8_t repeats_dropped_{0};
 
   // GO keep-alive message
   static const uint8_t GO_MESSAGE[15];

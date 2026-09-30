@@ -340,7 +340,9 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
 
   // Multi-part message handling using byte[9] as continuation flag
   // byte[9] == 0x01: more parts coming, byte[9] == 0x00: last part
-  // Header is 16 bytes: [0-13]=protocol header + [14-15]=5251("RQ" frame marker)
+  // Header is 16 bytes: [0-13]=protocol header + [14-15]=config/status versions
+  // from the handshake (41 42 for inYT_C65/S66; the 52 51 an inYT_C82/S81 pack
+  // sends happens to read as ASCII "RQ")
   // Stripping 16 bytes aligns payload with geckolib struct offsets
   // Only concatenate messages with byte[1]=0x09 (config/status type)
   static const int HEADER_LEN = 16;
@@ -348,7 +350,24 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
   if (len >= HEADER_LEN && data[1] == 0x09) {
     bool more_coming = (data[9] == 0x01);
 
-    // Add this part to buffer (strip 16-byte header including frame marker)
+    // Some packs send the same part several times in a row (an inYT C65/S66
+    // repeats one part about ten times). Appending every copy inflates the
+    // message past any size the parser recognises, so the whole message was
+    // thrown away. Skip a part identical to the one just appended. Only
+    // mid-message: standalone messages are always handled, so a resent
+    // handshake message still gets its ACK.
+    if (msg_buffer_len_ > 0 && len == last_part_len_ && memcmp(data, last_part_, len) == 0) {
+      repeats_dropped_++;
+      return;
+    }
+    memcpy(last_part_, data, len);
+    last_part_len_ = len;
+
+    char header_hex[HEADER_LEN * 2 + 1];
+    for (int i = 0; i < HEADER_LEN; i++)
+      sprintf(header_hex + i * 2, "%02X", data[i]);
+
+    // Add this part to buffer (strip 16-byte header)
     int payload_start = HEADER_LEN;
     int payload_len = len - payload_start;
     if (msg_buffer_len_ + payload_len <= sizeof(msg_buffer_)) {
@@ -357,9 +376,13 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
     }
 
     if (more_coming) {
-      ESP_LOGD(TAG, "Message part (%d bytes), more coming. Buffer now %d bytes", len, msg_buffer_len_);
+      ESP_LOGD(TAG, "Message part (%d bytes), more coming. Buffer now %d bytes. Header %s", len, msg_buffer_len_,
+               header_hex);
       return;
     }
+    ESP_LOGD(TAG, "Last message part (%d bytes). Header %s", len, header_hex);
+    if (repeats_dropped_ > 0)
+      ESP_LOGD(TAG, "Skipped %u repeated part(s) of this message", repeats_dropped_);
 
     // Last part received - log complete message in FULL-RX format
     // Split into 32 bytes per line (64 hex characters)
@@ -455,6 +478,8 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
 
     // Reset buffer for next message
     msg_buffer_len_ = 0;
+    last_part_len_ = 0;
+    repeats_dropped_ = 0;
     return;
   }
 
