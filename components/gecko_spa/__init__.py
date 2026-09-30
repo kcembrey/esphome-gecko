@@ -11,6 +11,9 @@ from esphome.const import (
 )
 from esphome.core import CORE
 
+# Chips with a single I2C peripheral, where only bus 0 exists.
+SINGLE_I2C_VARIANTS = {"ESP32C3"}
+
 AUTO_LOAD = ["climate", "switch", "select", "binary_sensor", "text_sensor"]
 
 CONF_UART_ID = "uart_id"
@@ -74,6 +77,14 @@ def _validate_transport(config):
         )
     if config[CONF_SDA] == config[CONF_SCL]:
         raise cv.Invalid(f"'{CONF_SDA}' and '{CONF_SCL}' must be different pins")
+
+    from esphome.components.esp32 import get_esp32_variant
+
+    if config[CONF_I2C_BUS] != 0 and get_esp32_variant() in SINGLE_I2C_VARIANTS:
+        raise cv.Invalid(
+            f"{get_esp32_variant()} has a single I2C peripheral; '{CONF_I2C_BUS}' must be 0",
+            path=[CONF_I2C_BUS],
+        )
     return config
 
 
