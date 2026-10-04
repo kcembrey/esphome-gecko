@@ -158,6 +158,16 @@ class GeckoSpa : public Component {
   // Let the pumps run for the next `minutes` even inside quiet time.
   // 0 ends the pause and resumes quiet time straight away.
   void pause_quiet_time(uint32_t minutes = 120);
+  // Hold the spa in standby for the next `minutes`, whatever the time - for
+  // example to shed load while the house supply is near its limit. Call again
+  // to extend; 0 releases the hold. An unrenewed hold lapses by itself, so a
+  // lost release never keeps the spa off for long.
+  void hold_standby(uint32_t minutes);
+  bool is_standby_held() const { return standby_held_; }
+  void set_standby_hold_sensor(binary_sensor::BinarySensor *bs) {
+    standby_hold_sensor_ = bs;
+    bs->publish_state(standby_held_);
+  }
   float get_min_temperature() const { return min_temperature_; }
   float get_max_temperature() const { return max_temperature_; }
 
@@ -237,7 +247,11 @@ class GeckoSpa : public Component {
   uint16_t quiet_end_{0};
   float quiet_min_water_temp_{10.0f};
   bool quiet_wanted_{false};       // Quiet time is in force right now
-  bool quiet_owned_{false};        // The spa's current standby is ours to end
+  binary_sensor::BinarySensor *standby_hold_sensor_{nullptr};
+  bool standby_held_{false};       // A hold_standby() is in force
+  uint32_t standby_hold_until_{0};
+  void set_standby_held_(bool held);
+  bool quiet_owned_{false};        // The spa's current standby is ours to end (quiet time or hold)
   bool quiet_cold_hold_{false};    // Water too cold: quiet time off until the window ends
   bool quiet_paused_{false};
   bool quiet_unmapped_warned_{false};

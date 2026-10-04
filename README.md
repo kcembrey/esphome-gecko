@@ -336,6 +336,7 @@ The `Transport:` line in the boot log says which one is running. On a XIAO ESP32
 | `id(spa).recover_link()` | Reinitialise the link: I2C peripheral reset (direct mode) or Arduino reset pulse (proxy mode) |
 | `id(spa).reset_arduino()` | Alias of `recover_link()`, kept so older configs keep working |
 | `id(spa).pause_quiet_time(120)` | Let the pumps run for the next 120 minutes even inside quiet time; `0` resumes quiet time now |
+| `id(spa).hold_standby(15)` | Hold the spa in standby for the next 15 minutes, whatever the time; call again to extend, `0` releases - see [Standby hold](#standby-hold) |
 
 ### Quiet time
 
@@ -374,6 +375,30 @@ binary_sensor:
 ```
 
 Quiet time needs the standby timer's position in the status block, which is mapped for status version 51 and later.
+
+### Standby hold
+
+`hold_standby(minutes)` puts the spa in the same standby on demand - for example to shed load when a battery inverter is close to its limit, since standby stops the heater (about 4 kW on a 240 V pack) and every pump. Each call extends the hold; `0` releases it. A hold that is not renewed lapses by itself, so a lost release never keeps the spa off for long.
+
+Expose it to Home Assistant as an action, plus a sensor showing when a hold is in force:
+
+```yaml
+api:
+  actions:
+    - action: spa_standby_hold          # esphome.<device name>_spa_standby_hold in Home Assistant
+      variables:
+        minutes: int
+      then:
+        - lambda: id(spa).hold_standby(minutes);
+
+binary_sensor:
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: standby_hold
+    name: "Spa Standby Hold"
+```
+
+A hold works with or without `quiet_time`. Releasing it takes the spa out of standby only if the hold put it there and quiet time does not want it: a Maintenance run started from the panel is left alone.
 
 ### Water-care programs
 

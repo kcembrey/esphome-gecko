@@ -15,6 +15,7 @@ SENSOR_TYPES = {
     "waterfall": "WATERFALL",
     "blower": "BLOWER",
     "quiet_time": "QUIET_TIME",  # On while quiet time is holding the pumps off
+    "standby_hold": "STANDBY_HOLD",  # On while hold_standby() is in force
     "economy": "ECONOMY",  # Economy (lower setpoint) in effect
 }
 
@@ -41,5 +42,7 @@ async def to_code(config):
         cg.add(parent.set_blower_sensor(var))
     elif sensor_type == "quiet_time":
         cg.add(parent.set_quiet_time_sensor(var))
+    elif sensor_type == "standby_hold":
+        cg.add(parent.set_standby_hold_sensor(var))
     elif sensor_type == "economy":
         cg.add(parent.set_economy_sensor(var))

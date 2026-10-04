@@ -919,6 +919,33 @@ void GeckoSpa::pause_quiet_time(uint32_t minutes) {
   this->update_quiet_time_();
 }
 
+void GeckoSpa::hold_standby(uint32_t minutes) {
+  if (minutes == 0) {
+    if (!standby_held_)
+      return;
+    ESP_LOGI(TAG, "Standby hold released");
+    this->set_standby_held_(false);
+  } else {
+    standby_hold_until_ = millis() + minutes * 60000UL;
+    if (standby_held_) {
+      ESP_LOGD(TAG, "Standby hold extended for %" PRIu32 " min", minutes);
+      return;
+    }
+    ESP_LOGI(TAG, "Standby hold for %" PRIu32 " min", minutes);
+    this->set_standby_held_(true);
+  }
+  // Act now rather than on the next periodic check
+  last_quiet_check_ = 0;
+  last_quiet_command_ = 0;
+  this->update_quiet_time_();
+}
+
+void GeckoSpa::set_standby_held_(bool held) {
+  standby_held_ = held;
+  if (standby_hold_sensor_)
+    standby_hold_sensor_->publish_state(held);
+}
+
 bool GeckoSpa::in_quiet_window_() {
 #ifdef USE_GECKO_SPA_QUIET_TIME
   if (quiet_clock_ == nullptr)
@@ -937,40 +964,51 @@ bool GeckoSpa::in_quiet_window_() {
 }
 
 void GeckoSpa::update_quiet_time_() {
-  if (!quiet_configured_)
+  // Quiet time and standby holds share this: either can want standby, and
+  // a standby we started is ours to end once neither does.
+  if (!quiet_configured_ && !standby_held_ && !quiet_owned_)
     return;
   uint32_t now = millis();
   if (last_quiet_check_ != 0 && now - last_quiet_check_ < 5000)
     return;
   last_quiet_check_ = now;
 
-  if (quiet_paused_ && (int32_t) (quiet_pause_until_ - now) <= 0) {
-    quiet_paused_ = false;
-    ESP_LOGI(TAG, "Quiet time pause over");
+  if (standby_held_ && (int32_t) (standby_hold_until_ - now) <= 0) {
+    ESP_LOGI(TAG, "Standby hold lapsed");
+    this->set_standby_held_(false);
   }
 
-  bool in_window = this->in_quiet_window_();
-  if (!in_window) {
-    quiet_cold_hold_ = false;  // Each night starts fresh
-  } else if (!quiet_cold_hold_ && temps_known_ && actual_temp_ < quiet_min_water_temp_) {
-    // Standby also stops the heater, so let the spa look after itself
-    quiet_cold_hold_ = true;
-    ESP_LOGW(TAG, "Water at %.1f C is below %.1f C: quiet time off for the rest of tonight", actual_temp_,
-             quiet_min_water_temp_);
-  }
+  if (quiet_configured_) {
+    if (quiet_paused_ && (int32_t) (quiet_pause_until_ - now) <= 0) {
+      quiet_paused_ = false;
+      ESP_LOGI(TAG, "Quiet time pause over");
+    }
 
-  bool want = in_window && !quiet_paused_ && !quiet_cold_hold_;
-  if (want != quiet_wanted_) {
-    quiet_wanted_ = want;
-    ESP_LOGI(TAG, "Quiet time %s", want ? "on" : "off");
-    if (quiet_time_sensor_)
-      quiet_time_sensor_->publish_state(want);
+    bool in_window = this->in_quiet_window_();
+    if (!in_window) {
+      quiet_cold_hold_ = false;  // Each night starts fresh
+    } else if (!quiet_cold_hold_ && temps_known_ && actual_temp_ < quiet_min_water_temp_) {
+      // Standby also stops the heater, so let the spa look after itself
+      quiet_cold_hold_ = true;
+      ESP_LOGW(TAG, "Water at %.1f C is below %.1f C: quiet time off for the rest of tonight", actual_temp_,
+               quiet_min_water_temp_);
+    }
+
+    bool quiet = in_window && !quiet_paused_ && !quiet_cold_hold_;
+    if (quiet != quiet_wanted_) {
+      quiet_wanted_ = quiet;
+      ESP_LOGI(TAG, "Quiet time %s", quiet ? "on" : "off");
+      if (quiet_time_sensor_)
+        quiet_time_sensor_->publish_state(quiet);
+    }
   }
+  bool want = quiet_wanted_ || standby_held_;
+  const char *why = standby_held_ ? "Standby hold" : "Quiet time";
 
   const GeckoLogOffsets &off = *log_offsets_;
   if (off.udQuietTime == 0) {
     if (!quiet_unmapped_warned_) {
-      ESP_LOGW(TAG, "Quiet time is not supported for status version %d", status_version_);
+      ESP_LOGW(TAG, "Standby control is not supported for status version %d", status_version_);
       quiet_unmapped_warned_ = true;
     }
     return;
@@ -990,7 +1028,7 @@ void GeckoSpa::update_quiet_time_() {
     if (!standby_state_) {
       if (quiet_enter_attempts_ == 3)
         ESP_LOGW(TAG, "Spa has not gone into standby after 3 tries; retrying every 10 min");
-      ESP_LOGI(TAG, "Quiet time: putting the spa in standby for %u min", QUIET_STANDBY_MINUTES);
+      ESP_LOGI(TAG, "%s: putting the spa in standby for %u min", why, QUIET_STANDBY_MINUTES);
       // Timer either side of the state, so it sticks whether the spa resets
       // the timer when standby starts or wants it set beforehand
       this->write_value_(off.udQuietTime, QUIET_STANDBY_MINUTES);
@@ -1001,18 +1039,21 @@ void GeckoSpa::update_quiet_time_() {
         quiet_enter_attempts_++;
       last_quiet_command_ = now;
     } else {
-      // In standby - ours, or a Maintenance run from the panel we adopt
+      // In standby - ours, or a Maintenance run from the panel. Quiet time
+      // adopts that run; a hold leaves it alone, so releasing the hold does
+      // not cut it short.
       quiet_enter_attempts_ = 0;
-      quiet_owned_ = true;
-      if (ud_quiet_time_ <= QUIET_EXTEND_BELOW_MINUTES) {
-        ESP_LOGI(TAG, "Quiet time: extending standby (%u min left)", ud_quiet_time_);
+      if (quiet_wanted_)
+        quiet_owned_ = true;
+      if (quiet_owned_ && ud_quiet_time_ <= QUIET_EXTEND_BELOW_MINUTES) {
+        ESP_LOGI(TAG, "%s: extending standby (%u min left)", why, ud_quiet_time_);
         this->write_value_(off.udQuietTime, QUIET_STANDBY_MINUTES);
         last_quiet_command_ = now;
       }
     }
   } else if (quiet_owned_) {
     if (standby_state_) {
-      ESP_LOGI(TAG, "Quiet time: taking the spa out of standby");
+      ESP_LOGI(TAG, "Taking the spa out of standby");
       this->write_value_(off.quietState, QUIET_STATE_NOT_SET);
       this->write_value_(off.udQuietTime, 0);
       last_quiet_command_ = now;
