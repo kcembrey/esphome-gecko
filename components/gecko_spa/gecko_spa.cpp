@@ -34,6 +34,10 @@ void GeckoSpa::dump_config() {
   ESP_LOGCONFIG(TAG, "  Notification date format: %s",
                 notif_date_format_ == NotifDateFormat::Y_M_D ? "Y-M-D" : "D-M-Y");
   ESP_LOGCONFIG(TAG, "  Max temperature: %.1f C", max_temperature_);
+  if (quiet_configured_) {
+    ESP_LOGCONFIG(TAG, "  Quiet time: %02u:%02u-%02u:%02u (released below %.1f C water)", quiet_start_ / 60,
+                  quiet_start_ % 60, quiet_end_ / 60, quiet_end_ % 60, quiet_min_water_temp_);
+  }
 }
 
 void GeckoSpa::loop() {
@@ -62,6 +66,8 @@ void GeckoSpa::loop() {
       }
     }
   }
+
+  this->update_quiet_time_();
 
   // Send GO keep-alive every 23 seconds (triggers handshake sequence)
   if (millis() - last_go_send_time_ > 23000) {
@@ -596,10 +602,13 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
   float target_temp = target_raw / 18.0f;
   float actual_temp = actual_raw / 18.0f;
 
+  if (off.udQuietTime != 0)
+    ud_quiet_time_ = data[toB(off.udQuietTime)];
+
   // === Log decoded status (geckolib format) ===
-  ESP_LOGI(TAG, "Status[v%d]: Hours=%d QuietState=%s LockMode=%s PackType=%s",
+  ESP_LOGI(TAG, "Status[v%d]: Hours=%d QuietState=%s (%u min) LockMode=%s PackType=%s",
            status_version_, hours,
-           quietState < 4 ? quiet_str[quietState] : "?",
+           quietState < 4 ? quiet_str[quietState] : "?", ud_quiet_time_,
            lockMode < 3 ? lock_str[lockMode] : "?",
            packType < 11 ? pack_str[packType] : "?");
 
@@ -771,6 +780,141 @@ bool GeckoSpa::is_part_start_(uint16_t offset) const {
       return true;
   }
   return false;
+}
+
+void GeckoSpa::write_value_(uint16_t position, uint8_t value) {
+  // geckolib's SET_VALUE (0x46): write one byte at a pack memory position -
+  // the same command the light, pump and setpoint use.
+  uint8_t cmd[20] = {
+      0x17, 0x0A, 0x00, 0x00, 0x00, 0x17, 0x09, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x06, 0x46, config_version_, status_version_,
+      (uint8_t) (position >> 8), (uint8_t) (position & 0xFF), value, 0x00};
+  cmd[19] = calc_checksum(cmd, 20);
+  send_i2c_message(cmd, 20);
+}
+
+void GeckoSpa::pause_quiet_time(uint32_t minutes) {
+  if (!quiet_configured_) {
+    ESP_LOGW(TAG, "Quiet time is not configured");
+    return;
+  }
+  if (minutes == 0) {
+    quiet_paused_ = false;
+    ESP_LOGI(TAG, "Quiet time resumed");
+  } else {
+    quiet_paused_ = true;
+    quiet_pause_until_ = millis() + minutes * 60000UL;
+    ESP_LOGI(TAG, "Quiet time paused for %" PRIu32 " min", minutes);
+  }
+  // Act now rather than on the next periodic check
+  last_quiet_check_ = 0;
+  last_quiet_command_ = 0;
+  this->update_quiet_time_();
+}
+
+bool GeckoSpa::in_quiet_window_() {
+#ifdef USE_GECKO_SPA_QUIET_TIME
+  if (quiet_clock_ == nullptr)
+    return false;
+  auto now = quiet_clock_->now();
+  // No valid time yet: do not hold the spa off on a guess
+  if (!now.is_valid())
+    return false;
+  uint16_t minute = now.hour * 60 + now.minute;
+  if (quiet_start_ < quiet_end_)
+    return minute >= quiet_start_ && minute < quiet_end_;
+  return minute >= quiet_start_ || minute < quiet_end_;  // Window crosses midnight
+#else
+  return false;
+#endif
+}
+
+void GeckoSpa::update_quiet_time_() {
+  if (!quiet_configured_)
+    return;
+  uint32_t now = millis();
+  if (last_quiet_check_ != 0 && now - last_quiet_check_ < 5000)
+    return;
+  last_quiet_check_ = now;
+
+  if (quiet_paused_ && (int32_t) (quiet_pause_until_ - now) <= 0) {
+    quiet_paused_ = false;
+    ESP_LOGI(TAG, "Quiet time pause over");
+  }
+
+  bool in_window = this->in_quiet_window_();
+  if (!in_window) {
+    quiet_cold_hold_ = false;  // Each night starts fresh
+  } else if (!quiet_cold_hold_ && temps_known_ && actual_temp_ < quiet_min_water_temp_) {
+    // Standby also stops the heater, so let the spa look after itself
+    quiet_cold_hold_ = true;
+    ESP_LOGW(TAG, "Water at %.1f C is below %.1f C: quiet time off for the rest of tonight", actual_temp_,
+             quiet_min_water_temp_);
+  }
+
+  bool want = in_window && !quiet_paused_ && !quiet_cold_hold_;
+  if (want != quiet_wanted_) {
+    quiet_wanted_ = want;
+    ESP_LOGI(TAG, "Quiet time %s", want ? "on" : "off");
+    if (quiet_time_sensor_)
+      quiet_time_sensor_->publish_state(want);
+  }
+
+  const GeckoLogOffsets &off = *log_offsets_;
+  if (off.udQuietTime == 0) {
+    if (!quiet_unmapped_warned_) {
+      ESP_LOGW(TAG, "Quiet time is not supported for status version %d", status_version_);
+      quiet_unmapped_warned_ = true;
+    }
+    return;
+  }
+
+  // Only act on what the spa has reported, and once the handshake has given
+  // us the versions every write must carry
+  if (!connected_ || !first_status_received_ || config_version_ == 0 || status_version_ == 0)
+    return;
+  // Give the spa time to report back before sending anything else. If it
+  // keeps refusing standby, stop asking so often.
+  uint32_t gap = (want && !standby_state_ && quiet_enter_attempts_ >= 3) ? 600000UL : 60000UL;
+  if (last_quiet_command_ != 0 && now - last_quiet_command_ < gap)
+    return;
+
+  if (want) {
+    if (!standby_state_) {
+      if (quiet_enter_attempts_ == 3)
+        ESP_LOGW(TAG, "Spa has not gone into standby after 3 tries; retrying every 10 min");
+      ESP_LOGI(TAG, "Quiet time: putting the spa in standby for %u min", QUIET_STANDBY_MINUTES);
+      // Timer either side of the state, so it sticks whether the spa resets
+      // the timer when standby starts or wants it set beforehand
+      this->write_value_(off.udQuietTime, QUIET_STANDBY_MINUTES);
+      this->write_value_(off.quietState, QUIET_STATE_OFF);
+      this->write_value_(off.udQuietTime, QUIET_STANDBY_MINUTES);
+      quiet_owned_ = true;
+      if (quiet_enter_attempts_ < 255)
+        quiet_enter_attempts_++;
+      last_quiet_command_ = now;
+    } else {
+      // In standby - ours, or a Maintenance run from the panel we adopt
+      quiet_enter_attempts_ = 0;
+      quiet_owned_ = true;
+      if (ud_quiet_time_ <= QUIET_EXTEND_BELOW_MINUTES) {
+        ESP_LOGI(TAG, "Quiet time: extending standby (%u min left)", ud_quiet_time_);
+        this->write_value_(off.udQuietTime, QUIET_STANDBY_MINUTES);
+        last_quiet_command_ = now;
+      }
+    }
+  } else if (quiet_owned_) {
+    if (standby_state_) {
+      ESP_LOGI(TAG, "Quiet time: taking the spa out of standby");
+      this->write_value_(off.quietState, QUIET_STATE_NOT_SET);
+      this->write_value_(off.udQuietTime, 0);
+      last_quiet_command_ = now;
+    } else {
+      // Spa confirms it is out of standby; anything from here on is not ours
+      quiet_owned_ = false;
+      quiet_enter_attempts_ = 0;
+    }
+  }
 }
 
 int GeckoSpa::days_since_2000(int day, int month, int year) {

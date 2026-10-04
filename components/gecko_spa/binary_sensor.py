@@ -14,6 +14,7 @@ SENSOR_TYPES = {
     "connected": "CONNECTED",
     "waterfall": "WATERFALL",
     "blower": "BLOWER",
+    "quiet_time": "QUIET_TIME",  # On while quiet time is holding the pumps off
 }
 
 CONFIG_SCHEMA = binary_sensor.binary_sensor_schema().extend(
@@ -37,3 +38,5 @@ async def to_code(config):
         cg.add(parent.set_waterfall_sensor(var))
     elif sensor_type == "blower":
         cg.add(parent.set_blower_sensor(var))
+    elif sensor_type == "quiet_time":
+        cg.add(parent.set_quiet_time_sensor(var))

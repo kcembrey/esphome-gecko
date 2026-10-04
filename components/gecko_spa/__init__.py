@@ -1,14 +1,18 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
+from esphome.components import time as time_
 from esphome.components import uart
 from esphome.const import (
     CONF_ADDRESS,
     CONF_FREQUENCY,
+    CONF_HOUR,
     CONF_ID,
     CONF_MAX_TEMPERATURE,
+    CONF_MINUTE,
     CONF_SCL,
     CONF_SDA,
+    CONF_TIME_ID,
 )
 from esphome.core import CORE
 
@@ -29,6 +33,10 @@ CONF_RESET_PIN = "reset_pin"
 CONF_I2C_BUS = "i2c_bus"
 CONF_NOTIF_DATE_FORMAT = "notif_date_format"
 CONF_UART_TRANSPORT_ID = "uart_transport_id"
+CONF_QUIET_TIME = "quiet_time"
+CONF_START = "start"
+CONF_END = "end"
+CONF_MIN_WATER_TEMPERATURE = "min_water_temperature"
 CONF_I2C_TRANSPORT_ID = "i2c_transport_id"
 
 gecko_spa_ns = cg.esphome_ns.namespace("gecko_spa")
@@ -46,6 +54,32 @@ NOTIF_DATE_FORMATS = {
 }
 
 I2C_KEYS = (CONF_SDA, CONF_SCL)
+
+
+def _minute_of_day(value):
+    return value[CONF_HOUR] * 60 + value[CONF_MINUTE]
+
+
+def _validate_quiet_time(value):
+    if _minute_of_day(value[CONF_START]) == _minute_of_day(value[CONF_END]):
+        raise cv.Invalid("'start' and 'end' must be different times")
+    return value
+
+
+# Every night between start and end, hold the spa in standby (the panel's
+# Maintenance mode: all pumps off). Standby also stops the heater, so quiet
+# time gives up for the night if the water drops below min_water_temperature.
+QUIET_TIME_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.GenerateID(CONF_TIME_ID): cv.use_id(time_.RealTimeClock),
+            cv.Required(CONF_START): cv.time_of_day,
+            cv.Required(CONF_END): cv.time_of_day,
+            cv.Optional(CONF_MIN_WATER_TEMPERATURE, default="10°C"): cv.temperature,
+        }
+    ),
+    _validate_quiet_time,
+)
 
 
 def _validate_transport(config):
@@ -131,6 +165,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_MAX_TEMPERATURE, default="40°C"): cv.All(
                 cv.temperature, cv.Range(min=30.0, max=41.0)
             ),
+            cv.Optional(CONF_QUIET_TIME): QUIET_TIME_SCHEMA,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_transport,
@@ -177,3 +212,15 @@ async def to_code(config):
     cg.add(var.set_transport(transport))
     cg.add(var.set_notif_date_format(config[CONF_NOTIF_DATE_FORMAT]))
     cg.add(var.set_max_temperature(config[CONF_MAX_TEMPERATURE]))
+
+    if quiet := config.get(CONF_QUIET_TIME):
+        cg.add_define("USE_GECKO_SPA_QUIET_TIME")
+        clock = await cg.get_variable(quiet[CONF_TIME_ID])
+        cg.add(
+            var.set_quiet_time(
+                clock,
+                _minute_of_day(quiet[CONF_START]),
+                _minute_of_day(quiet[CONF_END]),
+                quiet[CONF_MIN_WATER_TEMPERATURE],
+            )
+        )

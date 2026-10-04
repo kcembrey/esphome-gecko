@@ -312,6 +312,7 @@ Direct I2C works on any ESP32, with either framework. These example configs comp
 | `frequency` | `100kHz` | Bus speed. The spa runs standard mode; leave it alone unless you know otherwise |
 | `notif_date_format` | `D-M-Y` | Swap to `Y-M-D` if the maintenance reminder dates look wrong |
 | `max_temperature` | `40°C` | Highest setpoint Home Assistant will offer and send, up to `41°C`. Gecko panels only reach 41 °C by holding the up key |
+| `quiet_time` | - | Hold the pumps off every night - see [Quiet time](#quiet-time) |
 | `uart_id` | - | Legacy Arduino proxy mode. Mutually exclusive with `sda`/`scl` |
 | `reset_pin` | - | Legacy Arduino proxy mode only - the GPIO wired to the Arduino's RST pin |
 
@@ -333,6 +334,45 @@ The `Transport:` line in the boot log says which one is running. On a XIAO ESP32
 | `id(spa).request_status()` | Send a GO immediately, prompting a fresh handshake and status dump |
 | `id(spa).recover_link()` | Reinitialise the link: I2C peripheral reset (direct mode) or Arduino reset pulse (proxy mode) |
 | `id(spa).reset_arduino()` | Alias of `recover_link()`, kept so older configs keep working |
+| `id(spa).pause_quiet_time(120)` | Let the pumps run for the next 120 minutes even inside quiet time; `0` resumes quiet time now |
+
+### Quiet time
+
+Outside its filter cycles a spa still runs its pumps now and then, mostly to circulate water past the heater's temperature probe. The only way to stop that is standby - the panel's Maintenance mode, which turns every pump off for a while (30 minutes from the panel). Quiet time puts the spa into that same standby every night and keeps it there:
+
+```yaml
+gecko_spa:
+  # ...
+  quiet_time:
+    time_id: ha_time       # your time: component; optional if you have just one
+    start: "21:00"
+    end: "09:00"
+    min_water_temperature: 10°C   # optional, default 10°C
+```
+
+- Each standby runs on the spa's own timer for 60 minutes and is topped up before it ends, so a crash or reboot can never keep the pumps off for more than an hour.
+- At `end` - or when paused - quiet time takes the spa out of the standby it started. It never ends a Maintenance run you started from the panel outside quiet time.
+- **Standby stops the heater too.** The water cools overnight and heats again after `end`. If it ever falls below `min_water_temperature`, quiet time gives up until the next night.
+- Turn on a pump during quiet time and quiet time will put the spa back in standby within about a minute. Pause it first.
+
+A button to pause it, and a sensor showing whether it is in force:
+
+```yaml
+button:
+  - platform: template
+    name: "Spa Quiet Time Off (2 h)"
+    icon: "mdi:volume-high"
+    on_press:
+      - lambda: id(spa).pause_quiet_time(120);
+
+binary_sensor:
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: quiet_time
+    name: "Spa Quiet Time"
+```
+
+Quiet time needs the standby timer's position in the status block, which is mapped for status version 51 and later.
 
 ---
 

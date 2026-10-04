@@ -12,6 +12,9 @@
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/sensor/sensor.h"
+#ifdef USE_GECKO_SPA_QUIET_TIME
+#include "esphome/components/time/real_time_clock.h"
+#endif
 
 namespace esphome {
 namespace gecko_spa {
@@ -30,6 +33,7 @@ struct GeckoLogOffsets {
   uint16_t lockMode;        // Keypad lock status
   uint16_t packType;        // Pack type identifier
   uint16_t udPumpTime;      // Pump timer countdown
+  uint16_t udQuietTime;     // Standby (Maintenance) timer in minutes; 0 = position unknown
 };
 
 // Default offsets for inYT v51+ (most common)
@@ -45,6 +49,7 @@ static const GeckoLogOffsets GECKO_LOG_OFFSETS_V51 = {
   .lockMode = 310,
   .packType = 289,
   .udPumpTime = 303,
+  .udQuietTime = 304,
 };
 
 // Offsets for inYT v50 (older version with shifted offsets)
@@ -60,6 +65,7 @@ static const GeckoLogOffsets GECKO_LOG_OFFSETS_V50 = {
   .lockMode = 309,
   .packType = 288,
   .udPumpTime = 302,
+  .udQuietTime = 0,  // Not mapped for v50, so quiet time stays off
 };
 
 class GeckoSpaClimate;
@@ -115,6 +121,25 @@ class GeckoSpa : public Component {
   // Highest setpoint accepted from Home Assistant. Gecko panels stop at 40 C
   // unless the up key is held, which unlocks 41 C.
   void set_max_temperature(float temp_c) { max_temperature_ = temp_c; }
+
+  // Quiet time: every night between start and end (minutes after midnight),
+  // hold the spa in standby - the panel's Maintenance mode, all pumps off.
+#ifdef USE_GECKO_SPA_QUIET_TIME
+  void set_quiet_time(time::RealTimeClock *clock, uint16_t start_minute, uint16_t end_minute, float min_water_temp) {
+    quiet_clock_ = clock;
+    quiet_start_ = start_minute;
+    quiet_end_ = end_minute;
+    quiet_min_water_temp_ = min_water_temp;
+    quiet_configured_ = true;
+  }
+#endif
+  void set_quiet_time_sensor(binary_sensor::BinarySensor *bs) {
+    quiet_time_sensor_ = bs;
+    bs->publish_state(quiet_wanted_);
+  }
+  // Let the pumps run for the next `minutes` even inside quiet time.
+  // 0 ends the pause and resumes quiet time straight away.
+  void pause_quiet_time(uint32_t minutes = 120);
   float get_max_temperature() const { return max_temperature_; }
   static constexpr float MIN_TEMPERATURE = 26.0f;
 
@@ -174,6 +199,36 @@ class GeckoSpa : public Component {
   GeckoTransport *transport_{nullptr};
   NotifDateFormat notif_date_format_{NotifDateFormat::D_M_Y};
   float max_temperature_{40.0f};
+
+  // Quiet time
+  binary_sensor::BinarySensor *quiet_time_sensor_{nullptr};
+#ifdef USE_GECKO_SPA_QUIET_TIME
+  time::RealTimeClock *quiet_clock_{nullptr};
+#endif
+  bool quiet_configured_{false};
+  uint16_t quiet_start_{0};
+  uint16_t quiet_end_{0};
+  float quiet_min_water_temp_{10.0f};
+  bool quiet_wanted_{false};       // Quiet time is in force right now
+  bool quiet_owned_{false};        // The spa's current standby is ours to end
+  bool quiet_cold_hold_{false};    // Water too cold: quiet time off until the window ends
+  bool quiet_paused_{false};
+  bool quiet_unmapped_warned_{false};
+  uint32_t quiet_pause_until_{0};
+  uint32_t last_quiet_check_{0};
+  uint32_t last_quiet_command_{0};
+  uint8_t quiet_enter_attempts_{0};
+  uint8_t ud_quiet_time_{0};       // Minutes left on the spa's standby timer, from status
+  // Each standby lasts this long on the spa's own timer and is topped up
+  // while quiet time holds, so a crash or reboot can never keep the pumps
+  // off for longer than this.
+  static constexpr uint8_t QUIET_STANDBY_MINUTES = 60;
+  static constexpr uint8_t QUIET_EXTEND_BELOW_MINUTES = 15;
+  static constexpr uint8_t QUIET_STATE_NOT_SET = 0;
+  static constexpr uint8_t QUIET_STATE_OFF = 3;  // Standby: what the panel's Maintenance mode uses
+  void update_quiet_time_();
+  bool in_quiet_window_();
+  void write_value_(uint16_t position, uint8_t value);
 
   // State
   bool light_state_{false};
