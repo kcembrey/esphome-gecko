@@ -500,6 +500,8 @@ Status data is sent as a **multi-part message** split across 3 I2C transmissions
 ```
 Where XX = continuation flag (byte 9), YY ZZ = length/type info
 
+**Part payload:** a big-endian word giving the pack memory position of the part's first byte, the data, then a checksum byte. Status parts start at position 256 (`01 00`), config parts at 0. Parts need not be contiguous: an inYT C65 config message carries positions 0, 59, 118 and 448, then its status block at 256, 315 and 374. So the component reads fields by position. Some packs send the same part several times, sometimes with fresher data, and resend the final part after the message is complete; the component keeps one copy of each. A part for position 0, or for a position already received, means the spa abandoned the message in progress and started a new one.
+
 **Message Identification (in concatenated 162-byte payload):**
 - Byte[1] = 0x00 indicates status data
 

@@ -222,6 +222,14 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
     ESP_LOGI(TAG, "Spa connected (I2C traffic detected)");
   }
 
+  // After a multi-part message the spa resends its final part several times.
+  // The copies carry nothing new; drop them before they are logged and
+  // handled as messages of their own.
+  if (msg_buffer_len_ == 0 && last_tail_len_ > 0 && len == last_tail_len_ && memcmp(data, last_tail_, len) == 0) {
+    repeats_dropped_++;
+    return;
+  }
+
   // Log standalone messages as FULL-RX (not continuation parts of multi-part messages)
   // Continuation flag is byte[9]: 0x01 = more coming
   bool is_continuation = (len >= 10 && data[9] == 0x01);
@@ -381,6 +389,25 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
     for (int i = 0; i < HEADER_LEN; i++)
       sprintf(header_hex + i * 2, "%02X", data[i]);
 
+    // Each part starts with the pack memory position of its first byte, which
+    // shows when the spa has abandoned the message in progress - a status
+    // update cut short by the keep-alive's config message, say. A part for
+    // the start of the config, or for a position already in the buffer,
+    // begins a new message. One for the same position as the part before it
+    // is a resend with fresher data, and replaces that part.
+    if (msg_buffer_len_ > 0 && len >= HEADER_LEN + 2) {
+      uint16_t position = (data[HEADER_LEN] << 8) | data[HEADER_LEN + 1];
+      int seen = this->part_index_for_position_(position);
+      if (seen >= 0 && seen == part_count_ - 1) {
+        msg_buffer_len_ = part_starts_[--part_count_];
+      } else if (position == 0 || seen >= 0) {
+        ESP_LOGD(TAG, "Part for position %u starts a new message; dropped %u bytes of an unfinished one", position,
+                 msg_buffer_len_);
+        msg_buffer_len_ = 0;
+        part_count_ = 0;
+      }
+    }
+
     // Add this part to buffer (strip 16-byte header)
     int payload_start = HEADER_LEN;
     int payload_len = len - payload_start;
@@ -398,7 +425,10 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
     }
     ESP_LOGD(TAG, "Last message part (%d bytes). Header %s", len, header_hex);
     if (repeats_dropped_ > 0)
-      ESP_LOGD(TAG, "Skipped %u repeated part(s) of this message", repeats_dropped_);
+      ESP_LOGD(TAG, "Skipped %u repeated part(s)", repeats_dropped_);
+    last_tail_len_ = part_count_ >= 2 ? len : 0;
+    if (last_tail_len_ > 0)
+      memcpy(last_tail_, data, len);
 
     // Last part received - log complete message in FULL-RX format
     // Split into 32 bytes per line (64 hex characters)
@@ -818,6 +848,15 @@ bool GeckoSpa::is_part_start_(uint16_t offset) const {
       return true;
   }
   return false;
+}
+
+int GeckoSpa::part_index_for_position_(uint16_t position) const {
+  for (uint8_t i = 0; i < part_count_; i++) {
+    uint16_t start = part_starts_[i];
+    if (start + 1 < msg_buffer_len_ && ((msg_buffer_[start] << 8) | msg_buffer_[start + 1]) == position)
+      return i;
+  }
+  return -1;
 }
 
 int GeckoSpa::byte_at_position_(uint16_t position) const {

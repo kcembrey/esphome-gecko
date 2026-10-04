@@ -300,6 +300,10 @@ class GeckoSpa : public Component {
   uint8_t last_part_[GECKO_MAX_FRAME_LEN];
   uint8_t last_part_len_{0};
   uint8_t repeats_dropped_{0};
+  // The final part of the last multi-part message, which the spa resends
+  // several times once the message is complete.
+  uint8_t last_tail_[GECKO_MAX_FRAME_LEN];
+  uint8_t last_tail_len_{0};
   // Where each part of the message being reassembled starts in msg_buffer_.
   // A status block embedded in a config message starts a part of its own.
   static const uint8_t MAX_PARTS = 16;
@@ -309,6 +313,9 @@ class GeckoSpa : public Component {
   // The byte at pack memory `position` in the message just reassembled, or
   // -1 if no part of it covers that position.
   int byte_at_position_(uint16_t position) const;
+  // Which part of the message being reassembled covers `position` as its
+  // first byte, or -1.
+  int part_index_for_position_(uint16_t position) const;
 
   // GO keep-alive message
   static const uint8_t GO_MESSAGE[15];
