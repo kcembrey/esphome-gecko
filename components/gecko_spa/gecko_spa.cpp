@@ -722,6 +722,35 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
     }
   }
 
+  // What the active program is doing. With FilterAccess = REMOTE (a pack
+  // whose filtration a water-care program runs) the program starts and
+  // stops filtration through these fields.
+  if (off.remoteFiltAction != 0) {
+    static const char *const filt_str[] = {"Idle", "Stop", "Start", "New", "Active"};
+    uint8_t action = data[toB(off.remoteFiltAction)];
+    uint16_t dur_at = toB(off.remoteFiltDur);
+    uint16_t time_left = data[dur_at] * 60 + data[dur_at + 1];
+    bool econ = data[toB(off.econActive)] & 0x04;
+
+    if (first || action != filt_action_) {
+      filt_action_ = action;
+      ESP_LOGI(TAG, "Filtration: %s", action < 5 ? filt_str[action] : "?");
+      if (filtration_sensor_)
+        filtration_sensor_->publish_state(action < 5 ? filt_str[action] : "?");
+    }
+    if (first || time_left != filt_time_left_) {
+      filt_time_left_ = time_left;
+      if (filter_time_left_sensor_)
+        filter_time_left_sensor_->publish_state(time_left);
+    }
+    if (first || econ != econ_active_) {
+      econ_active_ = econ;
+      ESP_LOGI(TAG, "Economy: %s", econ ? "ON" : "OFF");
+      if (economy_sensor_)
+        economy_sensor_->publish_state(econ);
+    }
+  }
+
   // Only update temperature if valid data was received
   // std::fabs: a bare abs() can resolve to the int overload and truncate, so
   // changes under a whole degree would never be published.

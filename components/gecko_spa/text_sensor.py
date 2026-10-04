@@ -19,6 +19,7 @@ SENSOR_TYPES = {
     "status_version": "STATUS_VERSION",
     "lock_mode": "LOCK_MODE",
     "pack_type": "PACK_TYPE",
+    "filtration": "FILTRATION",  # What the active program has filtration doing
 }
 
 CONFIG_SCHEMA = text_sensor.text_sensor_schema().extend(
@@ -52,3 +53,5 @@ async def to_code(config):
         cg.add(parent.set_lock_mode_sensor(var))
     elif sensor_type == "pack_type":
         cg.add(parent.set_pack_type_sensor(var))
+    elif sensor_type == "filtration":
+        cg.add(parent.set_filtration_sensor(var))

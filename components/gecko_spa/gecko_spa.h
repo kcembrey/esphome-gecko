@@ -34,6 +34,11 @@ struct GeckoLogOffsets {
   uint16_t packType;        // Pack type identifier
   uint16_t udPumpTime;      // Pump timer countdown
   uint16_t udQuietTime;     // Standby (Maintenance) timer in minutes; 0 = position unknown
+  // Remote filtration control: on packs whose filtration is driven by a
+  // water-care program, these show what the program is doing. 0 = unknown.
+  uint16_t remoteFiltAction;  // IDLE, STOP, START, NEW, ACTIVE
+  uint16_t remoteFiltDur;     // Time word: hours, minutes left
+  uint16_t econActive;        // Bit 2: economy (lower setpoint) in effect
 };
 
 // Default offsets for inYT v51+ (most common)
@@ -50,6 +55,11 @@ static const GeckoLogOffsets GECKO_LOG_OFFSETS_V51 = {
   .packType = 289,
   .udPumpTime = 303,
   .udQuietTime = 304,
+  // geckolib puts these at the same positions in every inYT status version
+  // from 51 through 83
+  .remoteFiltAction = 263,
+  .remoteFiltDur = 264,
+  .econActive = 281,
 };
 
 // Offsets for inYT v50 (older version with shifted offsets)
@@ -66,6 +76,9 @@ static const GeckoLogOffsets GECKO_LOG_OFFSETS_V50 = {
   .packType = 288,
   .udPumpTime = 302,
   .udQuietTime = 0,  // Not mapped for v50, so quiet time stays off
+  .remoteFiltAction = 0,
+  .remoteFiltDur = 0,
+  .econActive = 0,
 };
 
 class GeckoSpaClimate;
@@ -117,6 +130,10 @@ class GeckoSpa : public Component {
   void set_lock_mode_sensor(text_sensor::TextSensor *s) { lock_mode_sensor_ = s; }
   void set_pack_type_sensor(text_sensor::TextSensor *s) { pack_type_sensor_ = s; }
   void set_pump_timer_sensor(sensor::Sensor *s) { pump_timer_sensor_ = s; }
+  // What the active program is doing (read-only)
+  void set_filtration_sensor(text_sensor::TextSensor *s) { filtration_sensor_ = s; }
+  void set_filter_time_left_sensor(sensor::Sensor *s) { filter_time_left_sensor_ = s; }
+  void set_economy_sensor(binary_sensor::BinarySensor *bs) { economy_sensor_ = bs; }
   void set_notif_date_format(NotifDateFormat format) { notif_date_format_ = format; }
   // Highest setpoint accepted from Home Assistant. Gecko panels stop at 40 C
   // unless the up key is held, which unlocks 41 C.
@@ -196,6 +213,9 @@ class GeckoSpa : public Component {
   text_sensor::TextSensor *lock_mode_sensor_{nullptr};
   text_sensor::TextSensor *pack_type_sensor_{nullptr};
   sensor::Sensor *pump_timer_sensor_{nullptr};
+  text_sensor::TextSensor *filtration_sensor_{nullptr};
+  sensor::Sensor *filter_time_left_sensor_{nullptr};
+  binary_sensor::BinarySensor *economy_sensor_{nullptr};
   GeckoTransport *transport_{nullptr};
   NotifDateFormat notif_date_format_{NotifDateFormat::D_M_Y};
   float max_temperature_{40.0f};
@@ -219,6 +239,9 @@ class GeckoSpa : public Component {
   uint32_t last_quiet_command_{0};
   uint8_t quiet_enter_attempts_{0};
   uint8_t ud_quiet_time_{0};       // Minutes left on the spa's standby timer, from status
+  uint8_t filt_action_{0xFF};      // RemoteFiltAction last published
+  uint16_t filt_time_left_{0xFFFF};
+  bool econ_active_{false};
   // Each standby lasts this long on the spa's own timer and is topped up
   // while quiet time holds, so a crash or reboot can never keep the pumps
   // off for longer than this.

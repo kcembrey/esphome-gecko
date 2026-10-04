@@ -374,6 +374,37 @@ binary_sensor:
 
 Quiet time needs the standby timer's position in the status block, which is mapped for status version 51 and later.
 
+### Water-care programs
+
+On spas whose panel has water-care programs (Away, Standard, Energy, Super Energy, Weekend), each with its own filter times and days, the program - not the spa's internal filter schedule - starts and stops filtration. The spa reports this as `FilterAccess = REMOTE`. The program schedules themselves live in the panel, which the ESP32 cannot see from the spa's communication port, so they cannot be read or edited from Home Assistant.
+
+What you can do from Home Assistant:
+
+- **Switch program** with the `select` platform.
+- **See what the program is doing**, read-only:
+
+```yaml
+text_sensor:
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: filtration          # Idle / Stop / Start / New / Active
+    name: "Spa Filtration"
+
+sensor:
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: filter_time_left    # minutes left in the current filter run
+    name: "Spa Filter Time Left"
+
+binary_sensor:
+  - platform: gecko_spa
+    gecko_spa_id: spa
+    type: economy             # economy (lower setpoint) in effect
+    name: "Spa Economy"
+```
+
+These read fields that sit at the same positions in every inYT status version from 51 through 83.
+
 ---
 
 ## I2C Protocol

@@ -11,6 +11,7 @@ CONF_SENSOR_TYPE = "type"
 
 SENSOR_TYPES = {
     "pump_timer": "PUMP_TIMER",
+    "filter_time_left": "FILTER_TIME_LEFT",  # Minutes left in the current filter run
 }
 
 CONFIG_SCHEMA = sensor.sensor_schema(
@@ -32,3 +33,5 @@ async def to_code(config):
     sensor_type = config[CONF_SENSOR_TYPE]
     if sensor_type == "pump_timer":
         cg.add(parent.set_pump_timer_sensor(var))
+    elif sensor_type == "filter_time_left":
+        cg.add(parent.set_filter_time_left_sensor(var))
