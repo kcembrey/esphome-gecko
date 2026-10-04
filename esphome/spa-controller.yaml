@@ -73,6 +73,9 @@ gecko_spa:
   sda: GPIO2  # XIAO D0
   scl: GPIO4  # XIAO D2
   notif_date_format: Y-M-D  # Change to D-M-Y if dates for reminders don't look right
+  # Match the range the spa reports in the log ("Spa setpoint range")
+  min_temperature: 15
+  max_temperature: 41.1
 
 # Climate control
 climate:

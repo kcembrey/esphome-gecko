@@ -311,7 +311,8 @@ Direct I2C works on any ESP32, with either framework. These example configs comp
 | `address` | `0x17` | Bus address. Both the spa and the controller answer to this |
 | `frequency` | `100kHz` | Bus speed. The spa runs standard mode; leave it alone unless you know otherwise |
 | `notif_date_format` | `D-M-Y` | Swap to `Y-M-D` if the maintenance reminder dates look wrong |
-| `max_temperature` | `40°C` | Highest setpoint Home Assistant will offer and send, up to `41°C`. Gecko panels only reach 41 °C by holding the up key |
+| `min_temperature` | `26°C` | Lowest setpoint Home Assistant will offer and send, down to `10°C` |
+| `max_temperature` | `40°C` | Highest setpoint Home Assistant will offer and send, up to `41.1°C` (106 °F). Gecko panels only go above 40 °C by holding the up key |
 | `quiet_time` | - | Hold the pumps off every night - see [Quiet time](#quiet-time) |
 | `uart_id` | - | Legacy Arduino proxy mode. Mutually exclusive with `sda`/`scl` |
 | `reset_pin` | - | Legacy Arduino proxy mode only - the GPIO wired to the Arduino's RST pin |
@@ -669,7 +670,13 @@ RAW = round(temperature_celsius × 18)
 
 > Earlier versions assumed the high byte was always `02` and computed only the low byte as `RAW - 512`. That covers 28.5–42.5 °C; any setpoint below 28.5 °C reached the spa as the wrong value.
 
-41 °C is above the usual Gecko limit of 40 °C - panels only reach it by holding the up key - so set `max_temperature: 41` to allow it from Home Assistant.
+Each pack has its own setpoint range (`MinSetpointG`/`MaxSetpointG` in its config), which the log shows once the handshake completes:
+
+```
+[I][gecko_spa]: Config: Spa setpoint range 15.0-41.1 C
+```
+
+Set `min_temperature` and `max_temperature` to match, and you get a warning in the log if either reaches past the spa's range. Above 40 °C the panel only goes by holding the up key. `max_temperature` stops at 41.1 °C (106 °F), the maximum an inYT pack reports.
 
 **Example - Set 37°C** (config/status versions 65/66, so `41 42`):
 ```

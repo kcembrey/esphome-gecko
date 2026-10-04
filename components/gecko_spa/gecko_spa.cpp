@@ -33,7 +33,7 @@ void GeckoSpa::dump_config() {
     transport_->dump_transport_config();
   ESP_LOGCONFIG(TAG, "  Notification date format: %s",
                 notif_date_format_ == NotifDateFormat::Y_M_D ? "Y-M-D" : "D-M-Y");
-  ESP_LOGCONFIG(TAG, "  Max temperature: %.1f C", max_temperature_);
+  ESP_LOGCONFIG(TAG, "  Setpoint range: %.1f-%.1f C", min_temperature_, max_temperature_);
   if (quiet_configured_) {
     ESP_LOGCONFIG(TAG, "  Quiet time: %02u:%02u-%02u:%02u (released below %.1f C water)", quiet_start_ / 60,
                   quiet_start_ % 60, quiet_end_ / 60, quiet_end_ % 60, quiet_min_water_temp_);
@@ -167,8 +167,8 @@ void GeckoSpa::send_program_command(uint8_t prog) {
 }
 
 void GeckoSpa::send_temperature_command(float temp_c) {
-  if (temp_c < MIN_TEMPERATURE || temp_c > max_temperature_) {
-    ESP_LOGW(TAG, "Ignoring setpoint %.1f C, outside %.1f-%.1f C", temp_c, MIN_TEMPERATURE, max_temperature_);
+  if (temp_c < min_temperature_ || temp_c > max_temperature_) {
+    ESP_LOGW(TAG, "Ignoring setpoint %.1f C, outside %.1f-%.1f C", temp_c, min_temperature_, max_temperature_);
     return;
   }
   // Writes SetpointG (config offset 0x0001): a big-endian word in 1/18 C.
@@ -447,23 +447,32 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
       parse_status_message(msg_buffer_);
     } else if (msg_buffer_len_ >= 300 && msg_buffer_len_ <= 400) {
       // Config+status message (~390 bytes)
-      // Config section has +2 byte offset (geckolib offset N → message byte N+2)
-      static const int CFG_OFFSET = 2;  // Config struct offset
-
-      // Parse config section (with +2 offset from geckolib struct definitions)
-      // Geckolib offsets → message bytes: N → N+2
-      uint8_t config_num = msg_buffer_[CFG_OFFSET + 0];
-      uint16_t setpoint_raw = (msg_buffer_[CFG_OFFSET + 1] << 8) | msg_buffer_[CFG_OFFSET + 2];
+      // Fields are read by their geckolib config position. Each part starts
+      // with the position of its first byte, and the parts are not always
+      // contiguous, so only the first part lines up with a fixed offset.
+      auto cfg = [this](uint16_t position) -> uint8_t {
+        int value = this->byte_at_position_(position);
+        return value < 0 ? 0xFF : (uint8_t) value;
+      };
+      auto cfg_word = [&cfg](uint16_t position) -> uint16_t { return (cfg(position) << 8) | cfg(position + 1); };
+      uint8_t config_num = cfg(0);
+      uint16_t setpoint_raw = cfg_word(1);
       float setpoint_c = setpoint_raw / 18.0f;
-      uint8_t filt_freq = msg_buffer_[CFG_OFFSET + 3];
-      uint8_t temp_units = msg_buffer_[CFG_OFFSET + 33];  // 0=F, 1=C
-      uint8_t time_format = msg_buffer_[CFG_OFFSET + 34]; // 0=NA, 1=AmPm, 2=24h
-      uint8_t pump_timeout = msg_buffer_[CFG_OFFSET + 54];
-      uint8_t light_timeout = msg_buffer_[CFG_OFFSET + 55];
-      uint8_t econ_type = msg_buffer_[CFG_OFFSET + 70];   // 0=Standard, 1=Night
-      uint8_t customer_id = msg_buffer_[CFG_OFFSET + 111];
-      uint8_t num_zones = msg_buffer_[CFG_OFFSET + 127];
-      uint8_t silent_mode = msg_buffer_[CFG_OFFSET + 157]; // 0=NA, 1=OFF, 2=ECONOMY, 3=SLEEP, 4=NIGHT
+      uint8_t filt_freq = cfg(3);
+      uint8_t temp_units = cfg(33);     // 0=F, 1=C
+      uint8_t time_format = cfg(34);    // 0=NA, 1=AmPm, 2=24h
+      uint8_t pump_timeout = cfg(54);
+      uint8_t light_timeout = cfg(55);
+      uint8_t econ_type = cfg(70);      // 0=Standard, 1=Night
+      uint8_t customer_id = cfg(111);
+      uint8_t num_zones = cfg(127) & 0x07;  // Low 3 bits; the rest are other inMix flags
+      uint8_t silent_mode = cfg(157);   // 0=NA, 1=OFF, 2=ECONOMY, 3=SLEEP, 4=NIGHT
+
+      // MinSetpointG/MaxSetpointG: at 66/68 in config v51 and later (inXE,
+      // inYJ, inYT and inYE alike), 70/72 in v50, elsewhere before that.
+      uint16_t limits_at = config_version_ >= 51 ? 66 : config_version_ == 50 ? 70 : 0;
+      if (limits_at != 0 && this->byte_at_position_(limits_at + 3) >= 0)
+        this->check_setpoint_range_(cfg_word(limits_at), cfg_word(limits_at + 2));
 
       static const char* time_fmt_str[] = {"NA", "AmPm", "24h"};
       static const char* silent_str[] = {"NA", "OFF", "ECONOMY", "SLEEP", "NIGHT"};
@@ -811,6 +820,36 @@ bool GeckoSpa::is_part_start_(uint16_t offset) const {
   return false;
 }
 
+int GeckoSpa::byte_at_position_(uint16_t position) const {
+  // Each part's payload: a big-endian position word, data, a checksum byte.
+  for (uint8_t i = 0; i < part_count_; i++) {
+    uint16_t start = part_starts_[i];
+    uint16_t end = (i + 1 < part_count_) ? part_starts_[i + 1] : msg_buffer_len_;
+    if (end < start + 3)
+      continue;
+    uint16_t first = (msg_buffer_[start] << 8) | msg_buffer_[start + 1];
+    uint16_t count = end - start - 3;
+    if (position >= first && position < first + count)
+      return msg_buffer_[start + 2 + (position - first)];
+  }
+  return -1;
+}
+
+void GeckoSpa::check_setpoint_range_(uint16_t spa_min, uint16_t spa_max) {
+  if (spa_min == spa_min_setpoint_ && spa_max == spa_max_setpoint_)
+    return;
+  spa_min_setpoint_ = spa_min;
+  spa_max_setpoint_ = spa_max;
+  float min_c = spa_min / 18.0f;
+  float max_c = spa_max / 18.0f;
+  ESP_LOGI(TAG, "Config: Spa setpoint range %.1f-%.1f C", min_c, max_c);
+  // Compare in the spa's own units, so 41.1 C and 106 F count as equal.
+  if (lroundf(min_temperature_ * 18.0f) < spa_min)
+    ESP_LOGW(TAG, "min_temperature %.1f C is below the spa's own minimum of %.1f C", min_temperature_, min_c);
+  if (lroundf(max_temperature_ * 18.0f) > spa_max)
+    ESP_LOGW(TAG, "max_temperature %.1f C is above the spa's own maximum of %.1f C", max_temperature_, max_c);
+}
+
 void GeckoSpa::write_value_(uint16_t position, uint8_t value) {
   // geckolib's SET_VALUE (0x46): write one byte at a pack memory position -
   // the same command the light, pump and setpoint use.
@@ -1043,7 +1082,7 @@ climate::ClimateTraits GeckoSpaClimate::traits() {
   // Without these ESPHome does not report the water temperature or whether
   // the heater is running, and Home Assistant shows neither.
   traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE | climate::CLIMATE_SUPPORTS_ACTION);
-  traits.set_visual_min_temperature(GeckoSpa::MIN_TEMPERATURE);
+  traits.set_visual_min_temperature(parent_->get_min_temperature());
   traits.set_visual_max_temperature(parent_->get_max_temperature());
   traits.set_visual_temperature_step(0.5);
   return traits;

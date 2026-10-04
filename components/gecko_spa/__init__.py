@@ -9,6 +9,7 @@ from esphome.const import (
     CONF_HOUR,
     CONF_ID,
     CONF_MAX_TEMPERATURE,
+    CONF_MIN_TEMPERATURE,
     CONF_MINUTE,
     CONF_SCL,
     CONF_SDA,
@@ -25,6 +26,10 @@ MIN_IDF_VERSION = cv.Version(5, 4, 0)
 # ESP-IDF 6.0 dropped the version 1 driver and reworked the slave API; the IDF
 # backend has not been ported to it yet.
 UNSUPPORTED_IDF_VERSION = cv.Version(6, 0, 0)
+
+# The highest max_temperature allowed: 106 F, the maximum an inYT pack reports
+# (740 in its 1/18 C units). Written this way so "106°F" is accepted too.
+MAX_SETPOINT = 740 / 18
 
 AUTO_LOAD = ["climate", "switch", "select", "binary_sensor", "text_sensor"]
 
@@ -140,6 +145,15 @@ def _validate_transport(config):
     return config
 
 
+def _validate_setpoint_range(config):
+    if config[CONF_MIN_TEMPERATURE] >= config[CONF_MAX_TEMPERATURE]:
+        raise cv.Invalid(
+            f"'{CONF_MIN_TEMPERATURE}' must be below '{CONF_MAX_TEMPERATURE}'",
+            path=[CONF_MIN_TEMPERATURE],
+        )
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -160,15 +174,26 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_NOTIF_DATE_FORMAT, default="D-M-Y"): cv.enum(
                 NOTIF_DATE_FORMATS, upper=True
             ),
-            # Gecko packs cap the setpoint at 40 C; 41 C is only reachable on
-            # the panel by holding the up key, so it is opt-in here too.
+            # The setpoint range Home Assistant offers. Each pack reports its
+            # own (MinSetpointG/MaxSetpointG, shown in the log); match them.
+            cv.Optional(CONF_MIN_TEMPERATURE, default="26°C"): cv.All(
+                cv.temperature, cv.Range(min=10.0, max=40.0)
+            ),
+            # Gecko panels stop at 40 C unless the up key is held, so going
+            # higher is opt-in.
             cv.Optional(CONF_MAX_TEMPERATURE, default="40°C"): cv.All(
-                cv.temperature, cv.Range(min=30.0, max=41.0)
+                cv.temperature,
+                cv.Range(
+                    min=30.0,
+                    max=MAX_SETPOINT,
+                    msg="max_temperature must be between 30°C and 41.1°C (106°F)",
+                ),
             ),
             cv.Optional(CONF_QUIET_TIME): QUIET_TIME_SCHEMA,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_transport,
+    _validate_setpoint_range,
 )
 
 
@@ -211,6 +236,7 @@ async def to_code(config):
 
     cg.add(var.set_transport(transport))
     cg.add(var.set_notif_date_format(config[CONF_NOTIF_DATE_FORMAT]))
+    cg.add(var.set_min_temperature(config[CONF_MIN_TEMPERATURE]))
     cg.add(var.set_max_temperature(config[CONF_MAX_TEMPERATURE]))
 
     if quiet := config.get(CONF_QUIET_TIME):

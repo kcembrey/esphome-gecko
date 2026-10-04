@@ -135,8 +135,9 @@ class GeckoSpa : public Component {
   void set_filter_time_left_sensor(sensor::Sensor *s) { filter_time_left_sensor_ = s; }
   void set_economy_sensor(binary_sensor::BinarySensor *bs) { economy_sensor_ = bs; }
   void set_notif_date_format(NotifDateFormat format) { notif_date_format_ = format; }
-  // Highest setpoint accepted from Home Assistant. Gecko panels stop at 40 C
-  // unless the up key is held, which unlocks 41 C.
+  // Setpoint range accepted from Home Assistant. Gecko panels stop at 40 C
+  // unless the up key is held.
+  void set_min_temperature(float temp_c) { min_temperature_ = temp_c; }
   void set_max_temperature(float temp_c) { max_temperature_ = temp_c; }
 
   // Quiet time: every night between start and end (minutes after midnight),
@@ -157,8 +158,8 @@ class GeckoSpa : public Component {
   // Let the pumps run for the next `minutes` even inside quiet time.
   // 0 ends the pause and resumes quiet time straight away.
   void pause_quiet_time(uint32_t minutes = 120);
+  float get_min_temperature() const { return min_temperature_; }
   float get_max_temperature() const { return max_temperature_; }
-  static constexpr float MIN_TEMPERATURE = 26.0f;
 
   // Command methods
   void send_light_command(bool on);
@@ -218,7 +219,13 @@ class GeckoSpa : public Component {
   binary_sensor::BinarySensor *economy_sensor_{nullptr};
   GeckoTransport *transport_{nullptr};
   NotifDateFormat notif_date_format_{NotifDateFormat::D_M_Y};
+  float min_temperature_{26.0f};
   float max_temperature_{40.0f};
+  // The pack's own setpoint range (MinSetpointG/MaxSetpointG) in its 1/18 C
+  // units, as last read from the config message. 0 until read.
+  uint16_t spa_min_setpoint_{0};
+  uint16_t spa_max_setpoint_{0};
+  void check_setpoint_range_(uint16_t spa_min, uint16_t spa_max);
 
   // Quiet time
   binary_sensor::BinarySensor *quiet_time_sensor_{nullptr};
@@ -299,6 +306,9 @@ class GeckoSpa : public Component {
   uint16_t part_starts_[MAX_PARTS];
   uint8_t part_count_{0};
   bool is_part_start_(uint16_t offset) const;
+  // The byte at pack memory `position` in the message just reassembled, or
+  // -1 if no part of it covers that position.
+  int byte_at_position_(uint16_t position) const;
 
   // GO keep-alive message
   static const uint8_t GO_MESSAGE[15];
