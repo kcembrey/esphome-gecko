@@ -336,6 +336,7 @@ The `Transport:` line in the boot log says which one is running. On a XIAO ESP32
 | `id(spa).recover_link()` | Reinitialise the link: I2C peripheral reset (direct mode) or Arduino reset pulse (proxy mode) |
 | `id(spa).reset_arduino()` | Alias of `recover_link()`, kept so older configs keep working |
 | `id(spa).pause_quiet_time(120)` | Let the pumps run for the next 120 minutes even inside quiet time; `0` resumes quiet time now |
+| `id(spa).start_quiet_time(120)` | Start quiet time now, outside the window too, for the next 120 minutes (a run that reaches the window carries on into it); `0` goes back to the schedule |
 | `id(spa).hold_standby(15)` | Hold the spa in standby for the next 15 minutes, whatever the time; call again to extend, `0` releases - see [Standby hold](#standby-hold) |
 
 ### Quiet time
@@ -357,7 +358,7 @@ gecko_spa:
 - **Standby stops the heater too.** The water cools overnight and heats again after `end`. If it ever falls below `min_water_temperature`, quiet time gives up until the next night.
 - Turn on a pump during quiet time and quiet time will put the spa back in standby within about a minute. Pause it first.
 
-A button to pause it, and a sensor showing whether it is in force:
+Buttons to pause it or start it early, and a sensor showing whether it is in force:
 
 ```yaml
 button:
@@ -366,6 +367,12 @@ button:
     icon: "mdi:volume-high"
     on_press:
       - lambda: id(spa).pause_quiet_time(120);
+
+  - platform: template
+    name: "Spa Quiet Time On (2 h)"     # start it early, or for a while during the day
+    icon: "mdi:sleep"
+    on_press:
+      - lambda: id(spa).start_quiet_time(120);
 
 binary_sensor:
   - platform: gecko_spa

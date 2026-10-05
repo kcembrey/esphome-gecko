@@ -158,6 +158,10 @@ class GeckoSpa : public Component {
   // Let the pumps run for the next `minutes` even inside quiet time.
   // 0 ends the pause and resumes quiet time straight away.
   void pause_quiet_time(uint32_t minutes = 120);
+  // Start quiet time now and keep it for the next `minutes`, outside the
+  // window too; a run that reaches the window carries on into it. Ends a
+  // pause. 0 ends a run started this way and goes back to the schedule.
+  void start_quiet_time(uint32_t minutes = 120);
   // Hold the spa in standby for the next `minutes`, whatever the time - for
   // example to shed load while the house supply is near its limit. Call again
   // to extend; 0 releases the hold. An unrenewed hold lapses by itself, so a
@@ -256,6 +260,8 @@ class GeckoSpa : public Component {
   bool quiet_paused_{false};
   bool quiet_unmapped_warned_{false};
   uint32_t quiet_pause_until_{0};
+  bool quiet_manual_{false};       // start_quiet_time() run in force
+  uint32_t quiet_manual_until_{0};
   uint32_t last_quiet_check_{0};
   uint32_t last_quiet_command_{0};
   uint8_t quiet_enter_attempts_{0};

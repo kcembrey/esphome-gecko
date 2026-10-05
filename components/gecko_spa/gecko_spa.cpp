@@ -911,9 +911,31 @@ void GeckoSpa::pause_quiet_time(uint32_t minutes) {
   } else {
     quiet_paused_ = true;
     quiet_pause_until_ = millis() + minutes * 60000UL;
+    quiet_manual_ = false;
     ESP_LOGI(TAG, "Quiet time paused for %" PRIu32 " min", minutes);
   }
   // Act now rather than on the next periodic check
+  last_quiet_check_ = 0;
+  last_quiet_command_ = 0;
+  this->update_quiet_time_();
+}
+
+void GeckoSpa::start_quiet_time(uint32_t minutes) {
+  if (!quiet_configured_) {
+    ESP_LOGW(TAG, "Quiet time is not configured");
+    return;
+  }
+  if (minutes == 0) {
+    if (!quiet_manual_)
+      return;
+    quiet_manual_ = false;
+    ESP_LOGI(TAG, "Quiet time back to its schedule");
+  } else {
+    quiet_manual_ = true;
+    quiet_manual_until_ = millis() + minutes * 60000UL;
+    quiet_paused_ = false;
+    ESP_LOGI(TAG, "Quiet time started for %" PRIu32 " min", minutes);
+  }
   last_quiet_check_ = 0;
   last_quiet_command_ = 0;
   this->update_quiet_time_();
@@ -984,7 +1006,12 @@ void GeckoSpa::update_quiet_time_() {
       ESP_LOGI(TAG, "Quiet time pause over");
     }
 
-    bool in_window = this->in_quiet_window_();
+    if (quiet_manual_ && (int32_t) (quiet_manual_until_ - now) <= 0) {
+      quiet_manual_ = false;
+      ESP_LOGI(TAG, "Quiet time started by hand is over");
+    }
+
+    bool in_window = this->in_quiet_window_() || quiet_manual_;
     if (!in_window) {
       quiet_cold_hold_ = false;  // Each night starts fresh
     } else if (!quiet_cold_hold_ && temps_known_ && actual_temp_ < quiet_min_water_temp_) {
