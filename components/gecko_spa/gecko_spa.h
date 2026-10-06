@@ -264,6 +264,8 @@ class GeckoSpa : public Component {
   uint32_t quiet_manual_until_{0};
   uint32_t last_quiet_check_{0};
   uint32_t last_quiet_command_{0};
+  uint32_t last_quiet_enter_{0};   // When we last asked for standby
+  uint8_t quiet_exit_attempts_{0};
   uint8_t quiet_enter_attempts_{0};
   uint8_t ud_quiet_time_{0};       // Minutes left on the spa's standby timer, from status
   uint8_t filt_action_{0xFF};      // RemoteFiltAction last published
@@ -274,6 +276,10 @@ class GeckoSpa : public Component {
   // off for longer than this.
   static constexpr uint8_t QUIET_STANDBY_MINUTES = 60;
   static constexpr uint8_t QUIET_EXTEND_BELOW_MINUTES = 15;
+  // Unconfirmed standby changes: retry this soon, this many times, then slower
+  static constexpr uint32_t QUIET_RETRY_MS = 15000;
+  static constexpr uint8_t QUIET_FAST_TRIES = 4;
+  static constexpr uint32_t QUIET_SLOW_RETRY_MS = 120000;
   static constexpr uint8_t QUIET_STATE_NOT_SET = 0;
   static constexpr uint8_t QUIET_STATE_OFF = 3;  // Standby: what the panel's Maintenance mode uses
   void update_quiet_time_();

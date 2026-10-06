@@ -141,15 +141,21 @@ class GeckoI2cTransport : public GeckoTransport {
 #endif
 
  protected:
-  // Frames we send are short - the longest command is 21 bytes - and a
-  // handshake burst never queues more than a couple at a time.
-  static const uint8_t TX_QUEUE_DEPTH = 6;
+  // Frames we send are short - the longest command is 21 bytes. They go out
+  // one per trip off the bus, so a standby change (three writes) plus the
+  // handshake ACKs can be waiting at once.
+  static const uint8_t TX_QUEUE_DEPTH = 10;
   static const uint8_t TX_FRAME_LEN = 32;
   static const uint8_t RX_QUEUE_DEPTH = 6;
   // Slave RX ring inside the driver. Two max-length frames of headroom.
   static const uint16_t SLAVE_RX_BUFFER_LEN = 256;
   // Never sit on a queued frame longer than this waiting for an idle bus.
   static const uint32_t TX_MAX_DEFER_MS = 500;
+  // Back in slave mode at least this long between frames, so the spa can
+  // deliver what it sends in reply before the next frame goes out.
+  static const uint32_t TX_GAP_MS = 50;
+  // A frame that keeps failing is dropped after this many trips.
+  static const uint8_t TX_MAX_ATTEMPTS = 3;
   // A 21 byte transaction at 100kHz takes ~2.5ms; this is generous but keeps a
   // dead bus from stalling the ESPHome loop.
   static const uint32_t TX_TIMEOUT_MS = 20;
@@ -214,6 +220,8 @@ class GeckoI2cTransport : public GeckoTransport {
   uint8_t tx_lengths_[TX_QUEUE_DEPTH]{};
   uint8_t tx_count_{0};
   uint32_t tx_queued_at_{0};
+  uint32_t last_tx_at_{0};
+  uint8_t tx_attempts_{0};  // Trips spent on the frame at the head of the queue
 
   // Diagnostics, surfaced in dump_config().
   uint32_t rx_dropped_{0};

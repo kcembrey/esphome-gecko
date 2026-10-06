@@ -1045,16 +1045,22 @@ void GeckoSpa::update_quiet_time_() {
   // us the versions every write must carry
   if (!connected_ || !first_status_received_ || config_version_ == 0 || status_version_ == 0)
     return;
-  // Give the spa time to report back before sending anything else. If it
-  // keeps refusing standby, stop asking so often.
-  uint32_t gap = (want && !standby_state_ && quiet_enter_attempts_ >= 3) ? 600000UL : 60000UL;
+  // Give the spa time to report back before sending anything else. Standby
+  // going on or off is retried soon if the spa has not confirmed it - a write
+  // can be lost on the bus - and less often if it keeps refusing.
+  uint32_t gap = 60000UL;
+  if (want && !standby_state_)
+    gap = quiet_enter_attempts_ < QUIET_FAST_TRIES ? QUIET_RETRY_MS : QUIET_SLOW_RETRY_MS;
+  else if (!want && quiet_owned_ && standby_state_)
+    gap = quiet_exit_attempts_ < QUIET_FAST_TRIES ? QUIET_RETRY_MS : QUIET_SLOW_RETRY_MS;
   if (last_quiet_command_ != 0 && now - last_quiet_command_ < gap)
     return;
 
   if (want) {
     if (!standby_state_) {
-      if (quiet_enter_attempts_ == 3)
-        ESP_LOGW(TAG, "Spa has not gone into standby after 3 tries; retrying every 10 min");
+      if (quiet_enter_attempts_ == QUIET_FAST_TRIES)
+        ESP_LOGW(TAG, "Spa has not gone into standby after %u tries; retrying every %" PRIu32 " s", QUIET_FAST_TRIES,
+                 QUIET_SLOW_RETRY_MS / 1000);
       ESP_LOGI(TAG, "%s: putting the spa in standby for %u min", why, QUIET_STANDBY_MINUTES);
       // Timer either side of the state, so it sticks whether the spa resets
       // the timer when standby starts or wants it set beforehand
@@ -1062,9 +1068,11 @@ void GeckoSpa::update_quiet_time_() {
       this->write_value_(off.quietState, QUIET_STATE_OFF);
       this->write_value_(off.udQuietTime, QUIET_STANDBY_MINUTES);
       quiet_owned_ = true;
+      quiet_exit_attempts_ = 0;
       if (quiet_enter_attempts_ < 255)
         quiet_enter_attempts_++;
       last_quiet_command_ = now;
+      last_quiet_enter_ = now;
     } else {
       // In standby - ours, or a Maintenance run from the panel. Quiet time
       // adopts that run; a hold leaves it alone, so releasing the hold does
@@ -1079,15 +1087,21 @@ void GeckoSpa::update_quiet_time_() {
       }
     }
   } else if (quiet_owned_) {
-    if (standby_state_) {
+    // Not reported in standby yet, but we asked for it only moments ago: it may
+    // still be on its way, so take it back out rather than leave it unowned
+    bool may_be_entering = last_quiet_enter_ != 0 && now - last_quiet_enter_ < QUIET_RETRY_MS;
+    if (standby_state_ || may_be_entering) {
       ESP_LOGI(TAG, "Taking the spa out of standby");
       this->write_value_(off.quietState, QUIET_STATE_NOT_SET);
       this->write_value_(off.udQuietTime, 0);
+      if (quiet_exit_attempts_ < 255)
+        quiet_exit_attempts_++;
       last_quiet_command_ = now;
     } else {
       // Spa confirms it is out of standby; anything from here on is not ours
       quiet_owned_ = false;
       quiet_enter_attempts_ = 0;
+      quiet_exit_attempts_ = 0;
     }
   }
 }

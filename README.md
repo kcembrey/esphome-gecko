@@ -908,7 +908,7 @@ On `framework: arduino`, the Arduino HAL refuses to start slave mode while SDA o
 
 ### `I2C transmit failed` warnings
 
-Occasional failures are normal: the spa is another master on the bus, so arbitration is sometimes lost. The component retries once and the spa resends status regularly. A constant stream of them means the spa is not ACKing address `0x17` - re-check wiring and the `address:` option.
+Occasional failures are normal: the spa is another master on the bus, so arbitration is sometimes lost. Frames go out one per trip off the bus, so the spa can answer in between, and a frame that fails is tried again on later trips - up to three - before it is dropped. Standby changes are also checked against the spa's status and sent again within 15 seconds if they did not take. A constant stream of failures means the spa is not ACKing address `0x17` - re-check wiring and the `address:` option.
 
 ### Commands are accepted but nothing happens
 

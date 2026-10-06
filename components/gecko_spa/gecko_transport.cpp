@@ -214,37 +214,50 @@ void GeckoI2cTransport::send_frame(const uint8_t *data, uint8_t len) {
 }
 
 void GeckoI2cTransport::flush_tx_queue_() {
-  uint8_t pending = tx_count_;
+  // One frame per trip off the bus. The spa answers a command with traffic of
+  // its own, which it cannot deliver while we are master; a second frame sent
+  // straight after collided with it and was lost - the second of a standby
+  // change's three writes, the one that sets the state, most of all. Back in
+  // slave mode we take the spa's frames, and the next one goes out later.
   uint32_t started = millis();
-  tx_count_ = 0;
-
   this->leave_slave_mode_();
 
   esp_err_t err = this->master_begin_();
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "I2C master init failed (%s), dropped %u frame(s)", esp_err_to_name(err), pending);
-    tx_errors_ += pending;
-  } else {
-    for (uint8_t i = 0; i < pending; i++) {
-      err = this->master_transfer_(tx_queue_[i], tx_lengths_[i]);
-      if (err != ESP_OK) {
-        // The spa is another master on this bus, so losing arbitration now and
-        // then is normal. One retry after a short backoff clears it.
-        delay(2);
-        err = this->master_transfer_(tx_queue_[i], tx_lengths_[i]);
-      }
-      if (err != ESP_OK) {
-        ESP_LOGW(TAG, "I2C transmit failed: %s", esp_err_to_name(err));
-        tx_errors_++;
-      }
+  if (err == ESP_OK) {
+    err = this->master_transfer_(tx_queue_[0], tx_lengths_[0]);
+    if (err != ESP_OK) {
+      // The spa is another master on this bus, so losing arbitration now and
+      // then is normal. One retry after a short backoff often clears it.
+      delay(2);
+      err = this->master_transfer_(tx_queue_[0], tx_lengths_[0]);
     }
     this->master_end_();
   }
 
+  bool sent = err == ESP_OK;
+  tx_attempts_++;
+  if (!sent)
+    ESP_LOGW(TAG, "I2C transmit failed: %s (try %u of %u)", esp_err_to_name(err), tx_attempts_, TX_MAX_ATTEMPTS);
+  bool dropped = !sent && tx_attempts_ >= TX_MAX_ATTEMPTS;
+  if (sent || dropped) {
+    if (dropped)
+      tx_errors_++;
+    // Done with the head of the queue: sent, or out of tries
+    tx_count_--;
+    for (uint8_t i = 0; i < tx_count_; i++) {
+      memcpy(tx_queue_[i], tx_queue_[i + 1], tx_lengths_[i + 1]);
+      tx_lengths_[i] = tx_lengths_[i + 1];
+    }
+    tx_attempts_ = 0;
+  }
+  last_tx_at_ = millis();
+  tx_queued_at_ = last_tx_at_;
+
   bool back_up = this->enter_slave_mode_();
   // The spa is deaf to us for the whole round trip, so it is worth being able
   // to see how long that window actually is on real hardware.
-  ESP_LOGD(TAG, "Sent %u frame(s), off the bus for %" PRIu32 " ms", pending, millis() - started);
+  ESP_LOGD(TAG, "%s 1 frame, off the bus for %" PRIu32 " ms, %u queued",
+           sent ? "Sent" : (dropped ? "Dropped" : "Will retry"), last_tx_at_ - started, tx_count_);
   if (!back_up)
     ESP_LOGW(TAG, "Could not return to slave mode after transmit, retrying");
 }
@@ -261,7 +274,8 @@ void GeckoI2cTransport::loop_transport() {
     }
   }
 
-  if (tx_count_ > 0 && (this->bus_is_idle_() || millis() - tx_queued_at_ > TX_MAX_DEFER_MS)) {
+  if (tx_count_ > 0 && millis() - last_tx_at_ >= TX_GAP_MS &&
+      (this->bus_is_idle_() || millis() - tx_queued_at_ > TX_MAX_DEFER_MS)) {
     this->flush_tx_queue_();
   } else if (!slave_active_ && millis() - last_slave_retry_ >= slave_retry_interval_) {
     this->enter_slave_mode_();
