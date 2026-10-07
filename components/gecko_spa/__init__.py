@@ -23,9 +23,9 @@ SINGLE_I2C_VARIANTS = {"ESP32C3"}
 # ESP-IDF's version 2 I2C slave driver, the one that reports where each
 # transaction ends, is only available from this release on.
 MIN_IDF_VERSION = cv.Version(5, 4, 0)
-# ESP-IDF 6.0 dropped the version 1 driver and reworked the slave API; the IDF
-# backend has not been ported to it yet.
-UNSUPPORTED_IDF_VERSION = cv.Version(6, 0, 0)
+# ESP-IDF 6.0 dropped version 1 of the slave driver, leaving version 2 - the
+# same API - as the only one, so the option that selects it is gone too.
+IDF_SLAVE_V2_ONLY_VERSION = cv.Version(6, 0, 0)
 
 # The highest max_temperature allowed: 106 F, the maximum an inYT pack reports
 # (740 in its 1/18 C units). Written this way so "106°F" is accepted too.
@@ -126,12 +126,6 @@ def _validate_transport(config):
                 f"(this build uses {idf_version()}). Update ESPHome, or use "
                 "'framework: type: arduino'"
             )
-        if idf_version() >= UNSUPPORTED_IDF_VERSION:
-            raise cv.Invalid(
-                f"Direct I2C mode does not support ESP-IDF {UNSUPPORTED_IDF_VERSION.major}.x "
-                f"yet (this build uses {idf_version()}). Use ESPHome's default ESP-IDF "
-                "5.5 by removing the framework 'version:', or 'framework: type: arduino'"
-            )
     if config[CONF_SDA] == config[CONF_SCL]:
         raise cv.Invalid(f"'{CONF_SDA}' and '{CONF_SCL}' must be different pins")
 
@@ -216,6 +210,7 @@ async def to_code(config):
         else:
             from esphome.components.esp32 import (
                 add_idf_sdkconfig_option,
+                idf_version,
                 include_builtin_idf_component,
             )
 
@@ -225,8 +220,10 @@ async def to_code(config):
             # and the option below is silently dropped along with its Kconfig.
             include_builtin_idf_component("esp_driver_i2c")
             # Version 1 of the IDF slave driver cannot tell where one
-            # transaction ends and the next begins; version 2 can.
-            add_idf_sdkconfig_option("CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2", True)
+            # transaction ends and the next begins; version 2 can. From
+            # ESP-IDF 6 it is the only one, with no option to set.
+            if idf_version() < IDF_SLAVE_V2_ONLY_VERSION:
+                add_idf_sdkconfig_option("CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2", True)
         transport = cg.new_Pvariable(config[CONF_I2C_TRANSPORT_ID])
         cg.add(transport.set_sda_pin(config[CONF_SDA]))
         cg.add(transport.set_scl_pin(config[CONF_SCL]))

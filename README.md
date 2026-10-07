@@ -322,7 +322,7 @@ Direct I2C mode works on both ESP32 frameworks, and picks the I2C slave backend 
 | Framework | Backend | Notes |
 |-----------|---------|-------|
 | `arduino` | The Arduino core's I2C slave HAL | The one the reference build has been run against a spa on |
-| `esp-idf` | ESP-IDF's I2C slave driver, version 2 | Needs ESP-IDF 5.4 or newer. The component enables `CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2` itself: version 1 cannot tell where one transaction ends and the next begins, and this protocol identifies messages by their length |
+| `esp-idf` | ESP-IDF's I2C slave driver, version 2 | Needs ESP-IDF 5.4 or newer. On 5.x the component enables `CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2` itself: version 1 cannot tell where one transaction ends and the next begins, and this protocol identifies messages by their length. ESP-IDF 6 has only version 2, the same API, so nothing needs enabling there |
 
 The `Transport:` line in the boot log says which one is running. On a XIAO ESP32-C3, esp-idf builds about 54 KB smaller in flash and saves about 3 KB of RAM.
 
